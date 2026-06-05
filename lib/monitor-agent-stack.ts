@@ -79,8 +79,8 @@ export class MonitorAgentStack extends cdk.Stack {
             new iam.PolicyStatement({
               actions: ['bedrock:InvokeModel'],
               resources: [
-                'arn:aws:bedrock:' + this.region + '::foundation-model/anthropic.claude-3-5-haiku-20241022-v1:0',
-                'arn:aws:bedrock:' + this.region + '::inference-profile/us.anthropic.claude-3-5-haiku-20241022-v1:0',
+                'arn:aws:bedrock:' + this.region + '::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0',
+                'arn:aws:bedrock:' + this.region + '::inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0',
               ],
             }),
           ],
@@ -119,7 +119,7 @@ export class MonitorAgentStack extends cdk.Stack {
 
     // Upload schema using Source.data to avoid unreliable glob negation patterns
     const schemaContent = fs.readFileSync(path.join(__dirname, 'monitor-openapi.json'), 'utf-8');
-    new s3deploy.BucketDeployment(this, 'SchemaDeployment', {
+    const schemaDeployment = new s3deploy.BucketDeployment(this, 'SchemaDeployment', {
       sources: [s3deploy.Source.data('monitor-openapi.json', schemaContent)],
       destinationBucket: schemaBucket,
     });
@@ -178,7 +178,7 @@ export class MonitorAgentStack extends cdk.Stack {
       agentName: 'aws-monitor-agent',
       description: 'Conversational agent for AWS infrastructure health monitoring',
       agentResourceRoleArn: agentRole.roleArn,
-      foundationModel: 'us.anthropic.claude-3-5-haiku-20241022-v1:0',
+      foundationModel: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
       idleSessionTtlInSeconds: 600,
       instruction: systemPrompt,
       actionGroups: [
@@ -197,6 +197,9 @@ export class MonitorAgentStack extends cdk.Stack {
         },
       ],
     });
+
+    // Ensure schema is in S3 before Bedrock Agent tries to read it
+    agent.node.addDependency(schemaDeployment);
 
     // 5. Prepare the agent before creating the alias (Bedrock requirement)
     // CfnAgent does not call PrepareAgent automatically — without this the alias
@@ -220,13 +223,13 @@ export class MonitorAgentStack extends cdk.Stack {
 
     const prepareAgent = new cr.AwsCustomResource(this, 'PrepareAgent', {
       onCreate: {
-        service: 'Bedrock Agent',
+        service: 'BedrockAgent',
         action: 'prepareAgent',
         parameters: { agentId: agent.attrAgentId },
         physicalResourceId: cr.PhysicalResourceId.of(agent.attrAgentId + '-prepare'),
       },
       onUpdate: {
-        service: 'Bedrock Agent',
+        service: 'BedrockAgent',
         action: 'prepareAgent',
         parameters: { agentId: agent.attrAgentId },
         physicalResourceId: cr.PhysicalResourceId.of(agent.attrAgentId + '-prepare'),
@@ -235,6 +238,7 @@ export class MonitorAgentStack extends cdk.Stack {
         resources: cr.AwsCustomResourcePolicy.ANY_RESOURCE,
       }),
       role: prepareAgentRole,
+      installLatestAwsSdk: false,
     });
 
     prepareAgent.node.addDependency(agent);
@@ -266,7 +270,8 @@ export class MonitorAgentStack extends cdk.Stack {
 
     new cdk.CfnOutput(this, 'ActionLambdaArn', {
       value: actionLambda.functionArn,
-      description: 'Action Group Lambda ARN',
+      description: 'Action Group Lambda for aws-monitor-agent',
+      exportName: 'AwsMonitorActionLambdaArn',
     });
   }
 }

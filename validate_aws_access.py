@@ -28,9 +28,8 @@ except ImportError:
     sys.exit(1)
 
 REGION = "us-east-1"
-# Claude 3.5 Haiku — active cheapest Anthropic model in Bedrock (Claude 3 Haiku is now Legacy)
-# Switch to "anthropic.claude-3-5-sonnet-20241022-v2:0" for production
-BEDROCK_MODEL = "us.anthropic.claude-3-5-haiku-20241022-v1:0"
+# Claude Haiku 4.5 — modelo activo más económico (2026-06-05)
+BEDROCK_MODEL = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 # ── Result model ──────────────────────────────────────────────────────────────
 @dataclass

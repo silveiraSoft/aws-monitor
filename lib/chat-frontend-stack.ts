@@ -6,6 +6,7 @@ import * as apigw from 'aws-cdk-lib/aws-apigateway';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
+import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
 import { Construct } from 'constructs';
 
 interface ChatFrontendProps extends cdk.StackProps {
@@ -40,13 +41,20 @@ export class ChatFrontendStack extends cdk.Stack {
       },
     });
 
+    // Security: retain logs 30 days only (cost + data hygiene)
+    const chatLogGroup = new logs.LogGroup(this, 'ChatProxyLogGroup', {
+      logGroupName: '/aws/lambda/aws-monitor-chat-proxy',
+      retention: logs.RetentionDays.ONE_MONTH,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
     const chatLambda = new lambda.Function(this, 'ChatProxyLambda', {
       functionName: 'aws-monitor-chat-proxy',
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'index.handler',
       code: lambda.Code.fromInline(this.chatProxyCode(agentId, agentAliasId)),
       role: chatLambdaRole,
-      timeout: cdk.Duration.seconds(60),
+      timeout: cdk.Duration.seconds(29),
       memorySize: 256,
       description: 'Proxy between chat UI and Bedrock Agent',
       environment: {
@@ -54,8 +62,7 @@ export class ChatFrontendStack extends cdk.Stack {
         AGENT_ALIAS_ID: agentAliasId,
         REGION: this.region,
       },
-      // Security: retain logs 30 days only (cost + data hygiene)
-      logRetention: logs.RetentionDays.ONE_MONTH,
+      logGroup: chatLogGroup,
     });
 
     // ── 2. API Gateway ────────────────────────────────────────────────────
@@ -82,7 +89,7 @@ export class ChatFrontendStack extends cdk.Stack {
     const chatResource = api.root.addResource('chat');
     chatResource.addMethod('POST', new apigw.LambdaIntegration(chatLambda, {
       proxy: true,
-      timeout: cdk.Duration.seconds(55),
+      timeout: cdk.Duration.seconds(29),
     }), {
       // Require API Key on this method
       apiKeyRequired: true,
@@ -159,30 +166,20 @@ export class ChatFrontendStack extends cdk.Stack {
       },
     });
 
-    const distribution = new cloudfront.CloudFrontWebDistribution(this, 'ChatDistribution', {
-      originConfigs: [
-        {
-          s3OriginSource: {
-            s3BucketSource: siteBucket,
-            originAccessIdentity: oai,
-          },
-          behaviors: [{ isDefaultBehavior: true }],
-        },
-      ],
+    const distribution = new cloudfront.Distribution(this, 'ChatDistribution', {
+      defaultBehavior: {
+        origin: origins.S3BucketOrigin.withOriginAccessIdentity(siteBucket, {
+          originAccessIdentity: oai,
+        }),
+        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+        responseHeadersPolicy: securityHeadersPolicy,
+      },
       defaultRootObject: 'index.html',
-      errorConfigurations: [
-        { errorCode: 403, responseCode: 200, responsePagePath: '/index.html' },
-        { errorCode: 404, responseCode: 200, responsePagePath: '/index.html' },
+      errorResponses: [
+        { httpStatus: 403, responseHttpStatus: 200, responsePagePath: '/index.html' },
+        { httpStatus: 404, responseHttpStatus: 200, responsePagePath: '/index.html' },
       ],
     });
-
-    // Security: attach response headers policy via CFN escape hatch
-    // (CloudFrontWebDistribution L2 does not expose responseHeadersPolicy on Behavior)
-    const cfnDistribution = distribution.node.defaultChild as cloudfront.CfnDistribution;
-    cfnDistribution.addPropertyOverride(
-      'DistributionConfig.DefaultCacheBehavior.ResponseHeadersPolicyId',
-      securityHeadersPolicy.responseHeadersPolicyId,
-    );
 
     // Write the frontend HTML with the API URL baked in
     const frontendHtml = this.buildFrontendHtml(api.url);
@@ -580,10 +577,14 @@ def handler(event, context):
 
 <div class="config-panel" id="configPanel" style="display:none">
   <div class="config-inner">
-    <label for="apiKeyInput"><strong>API Key</strong> <span style="font-weight:400;color:var(--text2)">— Obtenla con: <code>aws apigateway get-api-key --api-key &lt;ApiKeyId&gt; --include-value</code></span></label>
+    <label for="apiUrlInput"><strong>API URL</strong> <span style="font-weight:400;color:var(--text2)">— del output del deploy: <code>ApiUrl</code></span></label>
+    <div class="config-row">
+      <input type="text" id="apiUrlInput" placeholder="https://xxxxxxxxxx.execute-api.us-east-1.amazonaws.com/prod/" autocomplete="off" />
+    </div>
+    <label for="apiKeyInput" style="margin-top:8px"><strong>API Key</strong> <span style="font-weight:400;color:var(--text2)">— <code>aws apigateway get-api-key --api-key &lt;ApiKeyId&gt; --include-value --region us-east-1 --query value --output text</code></span></label>
     <div class="config-row">
       <input type="password" id="apiKeyInput" placeholder="Pega aqui tu API key..." autocomplete="off" />
-      <button onclick="saveApiKey()">Guardar</button>
+      <button onclick="saveConfig()">Guardar</button>
     </div>
     <span id="apiKeyStatus"></span>
   </div>
@@ -648,7 +649,7 @@ def handler(event, context):
 </div>
 
 <script>
-  const API_URL = '${apiUrl}chat';
+  let API_URL = sessionStorage.getItem('aws_monitor_api_url') || '${apiUrl}chat';
   // API Key is not embedded at build time (it is generated by AWS at deploy time).
   // Retrieve it after deploy with:
   //   aws apigateway get-api-key --api-key <ApiKeyId> --include-value --region us-east-1
@@ -682,27 +683,36 @@ def handler(event, context):
     const isVisible = panel.style.display !== 'none';
     panel.style.display = isVisible ? 'none' : 'block';
     if (!isVisible) {
+      const urlInp = document.getElementById('apiUrlInput');
+      urlInp.value = API_URL;
+      urlInp.placeholder = API_URL ? 'API URL configurada' : 'https://xxxxxxxxxx.execute-api.us-east-1.amazonaws.com/prod/';
       const inp = document.getElementById('apiKeyInput');
       inp.value = API_KEY;
       inp.placeholder = API_KEY ? 'API Key configurada' : 'Pega aqui tu API key...';
-      document.getElementById('apiKeyStatus').textContent = API_KEY ? '✅ API Key activa' : '⚠️ Sin API Key — las consultas fallarán con 403';
+      const ok = API_URL && API_KEY;
+      document.getElementById('apiKeyStatus').textContent = ok ? '✅ Configurado correctamente' : '⚠️ Completa API URL y API Key para usar el agente';
     }
   }
 
-  function saveApiKey() {
-    const val = document.getElementById('apiKeyInput').value.trim();
-    if (!val) { document.getElementById('apiKeyStatus').textContent = '⚠️ Ingresa una API Key válida'; return; }
-    API_KEY = val;
-    sessionStorage.setItem('aws_monitor_api_key', val);
-    document.getElementById('apiKeyStatus').textContent = '✅ API Key guardada en esta sesión';
-    showToast('API Key configurada');
+  function saveConfig() {
+    const urlVal = document.getElementById('apiUrlInput').value.trim().replace(/\/?$/, '/');
+    const keyVal = document.getElementById('apiKeyInput').value.trim();
+    if (!urlVal || !urlVal.startsWith('https://')) { document.getElementById('apiKeyStatus').textContent = '⚠️ Ingresa una API URL válida (debe empezar con https://)'; return; }
+    if (!keyVal) { document.getElementById('apiKeyStatus').textContent = '⚠️ Ingresa una API Key válida'; return; }
+    API_URL = urlVal + 'chat';
+    API_KEY = keyVal;
+    sessionStorage.setItem('aws_monitor_api_url', urlVal);
+    sessionStorage.setItem('aws_monitor_api_key', keyVal);
+    document.getElementById('apiKeyStatus').textContent = '✅ Configuración guardada';
+    showToast('Configuración guardada');
     setTimeout(() => document.getElementById('configPanel').style.display = 'none', 800);
   }
 
-  // Show config panel on load if no key is configured
-  if (!API_KEY) {
+  // Show config panel on load if not configured
+  if (!API_KEY || !API_URL || API_URL.includes('Token[')) {
+    if (API_URL.includes('Token[')) { API_URL = ''; sessionStorage.removeItem('aws_monitor_api_url'); }
     document.getElementById('configPanel').style.display = 'block';
-    document.getElementById('apiKeyStatus').textContent = '⚠️ Sin API Key — configura una para usar el agente';
+    document.getElementById('apiKeyStatus').textContent = '⚠️ Configura la API URL y API Key para usar el agente';
   }
 
   function sendSuggestion(text) {
