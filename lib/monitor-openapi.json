@@ -1,0 +1,421 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "AWS Monitor Actions",
+    "version": "1.0.0",
+    "description": "Action group for AWS health monitoring agent"
+  },
+  "paths": {
+    "/get_overall_health": {
+      "get": {
+        "operationId": "get_overall_health",
+        "summary": "Get overall AWS environment health",
+        "description": "Returns a combined health overview including EC2 instance states, active CloudWatch alarms, and Lambda function count. Use this as the first call for a general status check.",
+        "responses": {
+          "200": {
+            "description": "Overall health summary",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "overall_status": {
+                      "type": "string"
+                    },
+                    "timestamp": {
+                      "type": "string"
+                    },
+                    "ec2": {
+                      "type": "object"
+                    },
+                    "active_alarms": {
+                      "type": "integer"
+                    },
+                    "lambda_functions": {
+                      "type": "integer"
+                    },
+                    "recommendation": {
+                      "type": "string"
+                    },
+                    "region": {
+                      "type": "string",
+                      "description": "AWS region queried"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "region",
+            "in": "query",
+            "required": false,
+            "description": "AWS region to query (e.g. us-east-1, us-west-2, eu-west-1, ap-northeast-1). Default: us-east-1",
+            "schema": {
+              "type": "string",
+              "default": "us-east-1"
+            }
+          }
+        ]
+      }
+    },
+    "/get_ec2_health": {
+      "get": {
+        "operationId": "get_ec2_health",
+        "summary": "Get EC2 instance health",
+        "description": "Returns a list of EC2 instances with their state, type, IP addresses and availability zone. Can filter by instance state.",
+        "parameters": [
+          {
+            "name": "region",
+            "in": "query",
+            "required": false,
+            "description": "AWS region to query (e.g. us-east-1, us-west-2, eu-west-1, ap-northeast-1). Default: us-east-1",
+            "schema": {
+              "type": "string",
+              "default": "us-east-1"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "description": "Filter by instance state. Valid values: pending, running, shutting-down, stopping, stopped, terminated, all (default: all)",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "running",
+                "shutting-down",
+                "stopping",
+                "stopped",
+                "terminated",
+                "all"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "EC2 health data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "summary": {
+                      "type": "object"
+                    },
+                    "instances": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "region": {
+                      "type": "string",
+                      "description": "AWS region queried"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/get_lambda_health": {
+      "get": {
+        "operationId": "get_lambda_health",
+        "summary": "Get Lambda function health and error rates",
+        "description": "Returns Lambda functions with invocation counts, error rates, throttles, and average duration from CloudWatch metrics.",
+        "parameters": [
+          {
+            "name": "region",
+            "in": "query",
+            "required": false,
+            "description": "AWS region to query (e.g. us-east-1, us-west-2, eu-west-1, ap-northeast-1). Default: us-east-1",
+            "schema": {
+              "type": "string",
+              "default": "us-east-1"
+            }
+          },
+          {
+            "name": "prefix",
+            "in": "query",
+            "required": false,
+            "description": "Filter functions by name prefix",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "hours",
+            "in": "query",
+            "required": false,
+            "description": "Number of hours to look back for metrics (default: 24)",
+            "schema": {
+              "type": "integer",
+              "default": 24
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lambda health data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "period_hours": {
+                      "type": "integer"
+                    },
+                    "total_functions": {
+                      "type": "integer"
+                    },
+                    "functions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "region": {
+                      "type": "string",
+                      "description": "AWS region queried"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/get_logs_analysis": {
+      "get": {
+        "operationId": "get_logs_analysis",
+        "summary": "Query CloudWatch Logs Insights for errors and patterns",
+        "description": "Runs a CloudWatch Logs Insights query on a log group to find errors, exceptions, and patterns. Use this to diagnose why a Lambda function or service is failing. Returns matching log events with timestamps and messages.",
+        "parameters": [
+          {
+            "name": "region",
+            "in": "query",
+            "required": false,
+            "description": "AWS region to query (e.g. us-east-1, us-west-2, eu-west-1, ap-northeast-1). Default: us-east-1",
+            "schema": {
+              "type": "string",
+              "default": "us-east-1"
+            }
+          },
+          {
+            "name": "log_group",
+            "in": "query",
+            "required": true,
+            "description": "CloudWatch log group name (e.g. /aws/lambda/my-function)",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "hours",
+            "in": "query",
+            "required": false,
+            "description": "Number of hours to look back (default: 1, max: 24)",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          {
+            "name": "query",
+            "in": "query",
+            "required": false,
+            "description": "CloudWatch Logs Insights query string. Defaults to filtering ERROR/Exception/WARN messages sorted by time desc.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Log query results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "log_group": {
+                      "type": "string"
+                    },
+                    "period_hours": {
+                      "type": "integer"
+                    },
+                    "query": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string"
+                    },
+                    "total_events": {
+                      "type": "integer"
+                    },
+                    "error_events": {
+                      "type": "integer"
+                    },
+                    "statistics": {
+                      "type": "object"
+                    },
+                    "events": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "region": {
+                      "type": "string",
+                      "description": "AWS region queried"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/get_xray_traces": {
+      "get": {
+        "operationId": "get_xray_traces",
+        "summary": "Get X-Ray trace summaries to identify slow or failing requests",
+        "description": "Returns X-Ray distributed trace summaries showing which services are slow or throwing errors. Use this to find root cause in multi-service flows (Lambda calling RDS, external APIs, etc.).",
+        "parameters": [
+          {
+            "name": "region",
+            "in": "query",
+            "required": false,
+            "description": "AWS region to query (e.g. us-east-1, us-west-2, eu-west-1, ap-northeast-1). Default: us-east-1",
+            "schema": {
+              "type": "string",
+              "default": "us-east-1"
+            }
+          },
+          {
+            "name": "hours",
+            "in": "query",
+            "required": false,
+            "description": "Number of hours to look back (default: 1, max: 6)",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          {
+            "name": "filter_expression",
+            "in": "query",
+            "required": false,
+            "description": "X-Ray filter expression (e.g. 'error = true', 'fault = true', 'responsetime > 2')",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "X-Ray trace summaries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "period_hours": {
+                      "type": "integer"
+                    },
+                    "total_traces": {
+                      "type": "integer"
+                    },
+                    "summary": {
+                      "type": "object"
+                    },
+                    "traces": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "region": {
+                      "type": "string",
+                      "description": "AWS region queried"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/get_cloudwatch_alarms": {
+      "get": {
+        "operationId": "get_cloudwatch_alarms",
+        "summary": "Get CloudWatch alarms",
+        "description": "Returns CloudWatch metric and composite alarms, filtered by state. Use state=ALARM to see only firing alarms.",
+        "parameters": [
+          {
+            "name": "region",
+            "in": "query",
+            "required": false,
+            "description": "AWS region to query (e.g. us-east-1, us-west-2, eu-west-1, ap-northeast-1). Default: us-east-1",
+            "schema": {
+              "type": "string",
+              "default": "us-east-1"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "description": "Filter by alarm state: ALARM, OK, INSUFFICIENT_DATA, or ALL (default: ALARM)",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "ALARM",
+                "OK",
+                "INSUFFICIENT_DATA",
+                "ALL"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "CloudWatch alarms data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "summary": {
+                      "type": "object"
+                    },
+                    "alarms": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "region": {
+                      "type": "string",
+                      "description": "AWS region queried"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

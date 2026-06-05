@@ -1,0 +1,72 @@
+# Dependencies
+node_modules/
+
+# CDK / build output
+cdk.out/
+dist/
+*.js
+*.d.ts
+*.js.map
+*.d.ts.map
+
+# Python caches / test artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Environment files and local secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*.kdbx
+credentials
+credentials.json
+aws-credentials*
+*.tfvars
+*.tfstate
+*.tfstate.*
+
+# Logs and local runtime files
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS / editor / temporary files
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+*.swo
+~$*
+.fuse_hidden*
+
+# Generated documentation artifacts
+docs/unpacked_guide/
+
+# Local AI/session notes that include prompts or project-private context
+CLAUDE.md
+PROMS.txt
+
+# Duplicate local project copy
+/aws-monitor/
