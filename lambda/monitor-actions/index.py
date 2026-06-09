@@ -62,12 +62,13 @@ def _make_clients(region):
     }
 
 
-def ok(body, api_path=""):
+def ok(body, api_path="", http_method="POST"):
     return {
         "messageVersion": "1.0",
         "response": {
             "actionGroup": "MonitorActions",
             "apiPath": api_path,
+            "httpMethod": http_method,
             "httpStatusCode": 200,
             "responseBody": {
                 "application/json": {
@@ -78,12 +79,13 @@ def ok(body, api_path=""):
     }
 
 
-def err(message, code=500, api_path=""):
+def err(message, code=500, api_path="", http_method="POST"):
     return {
         "messageVersion": "1.0",
         "response": {
             "actionGroup": "MonitorActions",
             "apiPath": api_path,
+            "httpMethod": http_method,
             "httpStatusCode": code,
             "responseBody": {
                 "application/json": {
@@ -556,15 +558,17 @@ ACTIONS = {
 def handler(event, context):
     logger.info("Event: %s", json.dumps(event, default=str))
     api_path = event.get("apiPath", "")
+    http_method = event.get("httpMethod", "POST")
     action = api_path.lstrip("/")
     fn = ACTIONS.get(action)
     if not fn:
-        return err("Unknown action: {}".format(action), 404, api_path=api_path)
+        return err("Unknown action: {}".format(action), 404, api_path=api_path, http_method=http_method)
     try:
         result = fn(event)
-        # Inject apiPath into the response envelope (required by Bedrock Agents contract)
+        # Inject apiPath and httpMethod into the response envelope (required by Bedrock Agents contract)
         result["response"]["apiPath"] = api_path
+        result["response"]["httpMethod"] = http_method
         return result
     except Exception as e:
         logger.exception("Action %s failed", action)
-        return err(str(e), api_path=api_path)
+        return err(str(e), api_path=api_path, http_method=http_method)

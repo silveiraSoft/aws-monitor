@@ -77,10 +77,14 @@ export class MonitorAgentStack extends cdk.Stack {
         BedrockPolicy: new iam.PolicyDocument({
           statements: [
             new iam.PolicyStatement({
-              actions: ['bedrock:InvokeModel'],
+              // Bedrock Agents use streaming internally — both actions required
+              // Cross-region inference profile may route to any US region — wildcard on foundation model
+              actions: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'],
               resources: [
-                'arn:aws:bedrock:' + this.region + '::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0',
-                'arn:aws:bedrock:' + this.region + '::inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0',
+                // Cross-region inference profile requires account ID in ARN
+                'arn:aws:bedrock:' + this.region + ':' + this.account + ':inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0',
+                // Foundation model: wildcard region covers all US regions the profile may route to
+                'arn:aws:bedrock:*::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0',
               ],
             }),
           ],
