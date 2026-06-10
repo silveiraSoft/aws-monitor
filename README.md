@@ -4,7 +4,6 @@ Chat-based AWS health monitoring powered by **Amazon Bedrock Agents** + **Claude
 Empresa: **3htp** · Región: **us-east-1** · Cuenta: `369595298303`
 
 ## Architecture
-
 ```
 Browser (CloudFront/S3)
     │
