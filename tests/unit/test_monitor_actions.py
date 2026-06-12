@@ -941,9 +941,10 @@ class TestInputValidationSecurity(unittest.TestCase):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestConstants(unittest.TestCase):
-    def test_actions_dict_has_six_entries(self):
+    def test_actions_dict_has_seven_entries(self):
         expected = {"get_ec2_health", "get_lambda_health", "get_cloudwatch_alarms",
-                    "get_overall_health", "get_logs_analysis", "get_xray_traces"}
+                    "get_overall_health", "get_logs_analysis", "get_xray_traces",
+                    "get_ssm_inventory"}
         self.assertEqual(set(index.ACTIONS.keys()), expected)
 
     def test_valid_ec2_states_contains_all(self):
@@ -973,6 +974,220 @@ class TestConstants(unittest.TestCase):
             clients = index._make_clients("us-east-1")
         for key in ("ec2", "lambda", "cloudwatch", "logs", "xray"):
             self.assertIn(key, clients)
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SSM Inventory tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+def make_ssm_instance(instance_id="i-0abc123", platform="Linux",
+                      platform_name="Amazon Linux 2", platform_version="2",
+                      agent_version="3.2.0", ip="10.0.0.5", ping="Online"):
+    return {
+        "InstanceId":        instance_id,
+        "ComputerName":      "ip-10-0-0-5",
+        "PlatformType":      platform,
+        "PlatformName":      platform_name,
+        "PlatformVersion":   platform_version,
+        "AgentVersion":      agent_version,
+        "IPAddress":         ip,
+        "PingStatus":        ping,
+        "LastPingDateTime":  datetime.now(timezone.utc),
+        "AssociationStatus": "Success",
+        "ResourceType":      "ManagedInstance",
+    }
+
+
+def make_ssm_client(instances=None, inventory_pages=None):
+    """Return a mock SSM client with paginator support."""
+    ssm = MagicMock()
+    inst_pages = [{"InstanceInformationList": instances or []}]
+    inst_pag = make_paginator(inst_pages)
+    inv_pages = inventory_pages if inventory_pages is not None else [{"Entities": []}]
+    inv_pag = make_paginator(inv_pages)
+
+    def pag_side_effect(op):
+        if op == "describe_instance_information":
+            return inst_pag
+        if op == "get_inventory":
+            return inv_pag
+        return make_paginator([{}])
+
+    ssm.get_paginator.side_effect = pag_side_effect
+    return ssm
+
+
+class TestGetSsmInventory(unittest.TestCase):
+
+    def _call(self, params=None, extra=None):
+        event = make_event("get_ssm_inventory", params or [])
+        if extra:
+            event.update(extra)
+        return index.get_ssm_inventory(event)
+
+    # -- happy path --------------------------------------------------------
+
+    def test_returns_managed_instances(self):
+        inst = make_ssm_instance("i-0abc123")
+        ssm = make_ssm_client(instances=[inst])
+        with patch("index.boto3") as mock_boto:
+            mock_boto.client.return_value = ssm
+            resp = self._call()
+        body = parse_body(resp)
+        self.assertEqual(body["managed_instance_count"], 1)
+        self.assertEqual(body["instances"][0]["instance_id"], "i-0abc123")
+        self.assertEqual(body["instances"][0]["platform_name"], "Amazon Linux 2")
+
+    def test_inventory_type_application_accepted(self):
+        inst = make_ssm_instance()
+        inv_page = [{
+            "Entities": [{
+                "Id": "i-0abc123",
+                "Data": {
+                    "AWS:Application": {
+                        "Content": [
+                            {"Name": "python3", "Version": "3.9.0", "Publisher": "Amazon"},
+                            {"Name": "nginx",   "Version": "1.22.1", "Publisher": "nginx"},
+                        ]
+                    }
+                }
+            }]
+        }]
+        ssm = make_ssm_client(instances=[inst], inventory_pages=inv_page)
+        with patch("index.boto3") as mock_boto:
+            mock_boto.client.return_value = ssm
+            resp = self._call(params=[{"name": "inventory_type", "value": "AWS:Application"}])
+        body = parse_body(resp)
+        self.assertEqual(resp["response"]["httpStatusCode"], 200)
+        self.assertGreaterEqual(body["managed_instance_count"], 1)
+
+    def test_filter_by_instance_id(self):
+        inst = make_ssm_instance("i-0specific")
+        ssm = make_ssm_client(instances=[inst])
+        with patch("index.boto3") as mock_boto:
+            mock_boto.client.return_value = ssm
+            resp = self._call(params=[{"name": "instance_id", "value": "i-0specific"}])
+        body = parse_body(resp)
+        self.assertEqual(body["managed_instance_count"], 1)
+        self.assertEqual(body["instances"][0]["instance_id"], "i-0specific")
+
+    def test_no_managed_instances_returns_helpful_message(self):
+        ssm = make_ssm_client(instances=[])
+        with patch("index.boto3") as mock_boto:
+            mock_boto.client.return_value = ssm
+            resp = self._call()
+        body = parse_body(resp)
+        self.assertEqual(body["managed_instance_count"], 0)
+        self.assertIn("SSM Agent", body["message"])
+        self.assertIn("AmazonSSMManagedInstanceCore", body["message"])
+
+    def test_all_inventory_type_queries_multiple_types(self):
+        inst = make_ssm_instance()
+        ssm = make_ssm_client(instances=[inst], inventory_pages=[{"Entities": []}])
+        with patch("index.boto3") as mock_boto:
+            mock_boto.client.return_value = ssm
+            resp = self._call(params=[{"name": "inventory_type", "value": "ALL"}])
+        body = parse_body(resp)
+        self.assertEqual(resp["response"]["httpStatusCode"], 200)
+        self.assertGreater(ssm.get_paginator.call_count, 1)
+
+    def test_multi_region_uses_correct_region(self):
+        ssm = make_ssm_client(instances=[])
+        with patch("index.boto3") as mock_boto:
+            mock_boto.client.return_value = ssm
+            self._call(params=[{"name": "region", "value": "eu-west-1"}])
+            mock_boto.client.assert_called_with("ssm", region_name="eu-west-1")
+
+    def test_default_inventory_type_is_instance_information(self):
+        inst = make_ssm_instance()
+        ssm = make_ssm_client(instances=[inst])
+        with patch("index.boto3") as mock_boto:
+            mock_boto.client.return_value = ssm
+            resp = self._call()
+        body = parse_body(resp)
+        self.assertEqual(body["inventory_type_queried"], "AWS:InstanceInformation")
+
+    def test_response_includes_note_about_prerequisites(self):
+        ssm = make_ssm_client(instances=[make_ssm_instance()])
+        with patch("index.boto3") as mock_boto:
+            mock_boto.client.return_value = ssm
+            resp = self._call()
+        body = parse_body(resp)
+        self.assertIn("SSM Agent", body["note"])
+        self.assertIn("AmazonSSMManagedInstanceCore", body["note"])
+
+    # -- validation errors -------------------------------------------------
+
+    def test_invalid_inventory_type_returns_400(self):
+        ssm = make_ssm_client()
+        with patch("index.boto3") as mock_boto:
+            mock_boto.client.return_value = ssm
+            resp = self._call(params=[{"name": "inventory_type", "value": "INVALID_TYPE"}])
+        self.assertEqual(resp["response"]["httpStatusCode"], 400)
+        body = parse_body(resp)
+        self.assertIn("inventory_type", body["error"])
+
+    def test_invalid_region_returns_400(self):
+        ssm = make_ssm_client()
+        with patch("index.boto3") as mock_boto:
+            mock_boto.client.return_value = ssm
+            resp = self._call(params=[{"name": "region", "value": "fake-region-99"}])
+        self.assertEqual(resp["response"]["httpStatusCode"], 400)
+
+    def test_valid_inventory_types_accepted(self):
+        for inv_type in index.SSM_INVENTORY_TYPES:
+            inst = make_ssm_instance()
+            ssm = make_ssm_client(instances=[inst])
+            with patch("index.boto3") as mock_boto:
+                mock_boto.client.return_value = ssm
+                resp = self._call(params=[{"name": "inventory_type", "value": inv_type}])
+            self.assertNotEqual(
+                resp["response"]["httpStatusCode"], 400,
+                msg="inventory_type '{}' should be valid".format(inv_type)
+            )
+
+    # -- response envelope -------------------------------------------------
+
+    def test_response_envelope_has_message_version(self):
+        ssm = make_ssm_client(instances=[make_ssm_instance()])
+        with patch("index.boto3") as mock_boto:
+            mock_boto.client.return_value = ssm
+            resp = self._call()
+        self.assertEqual(resp["messageVersion"], "1.0")
+
+    def test_response_envelope_has_action_group(self):
+        ssm = make_ssm_client(instances=[make_ssm_instance()])
+        with patch("index.boto3") as mock_boto:
+            mock_boto.client.return_value = ssm
+            resp = self._call()
+        self.assertEqual(resp["response"]["actionGroup"], "MonitorActions")
+
+    # -- handler routing ---------------------------------------------------
+
+    def test_handler_routes_to_ssm_inventory(self):
+        event = {
+            "apiPath": "/get_ssm_inventory",
+            "httpMethod": "POST",
+            "parameters": [],
+            "requestBody": {},
+        }
+        ssm = make_ssm_client(instances=[make_ssm_instance()])
+        with patch("index.boto3") as mock_boto:
+            mock_boto.client.return_value = ssm
+            resp = index.handler(event, {})
+        self.assertEqual(resp["response"]["apiPath"], "/get_ssm_inventory")
+        self.assertEqual(resp["response"]["httpMethod"], "POST")
+
+    def test_ssm_inventory_in_actions_dict(self):
+        self.assertIn("get_ssm_inventory", index.ACTIONS)
+        self.assertEqual(index.ACTIONS["get_ssm_inventory"], index.get_ssm_inventory)
+
+    def test_ssm_inventory_types_set_not_empty(self):
+        self.assertGreater(len(index.SSM_INVENTORY_TYPES), 0)
+        self.assertIn("AWS:InstanceInformation", index.SSM_INVENTORY_TYPES)
+        self.assertIn("AWS:Application", index.SSM_INVENTORY_TYPES)
+        self.assertIn("ALL", index.SSM_INVENTORY_TYPES)
 
 
 if __name__ == "__main__":

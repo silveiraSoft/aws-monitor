@@ -17,16 +17,16 @@ import re
 import os
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-TS_FILE = os.path.join(ROOT, "lib", "chat-frontend-stack.ts")
+HTML_FILE = os.path.join(ROOT, "lib", "frontend.html")
 
 
-def extract_html(ts_source: str) -> str:
-    """Extract the HTML template literal from the TypeScript source."""
-    idx = ts_source.find("<!DOCTYPE html>")
-    end = ts_source.find("</html>", idx)
+def extract_html(source: str) -> str:
+    """Return the HTML content (already a standalone HTML file)."""
+    idx = source.find("<!DOCTYPE html>")
+    end = source.find("</html>", idx)
     if idx == -1 or end == -1:
         raise ValueError("HTML template not found in TypeScript source")
-    return ts_source[idx:end + 7]
+    return source[idx:end + 7]
 
 
 class TestFrontendHtmlStructure(unittest.TestCase):
@@ -34,7 +34,7 @@ class TestFrontendHtmlStructure(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        with open(TS_FILE, encoding="utf-8") as f:
+        with open(HTML_FILE, encoding="utf-8") as f:
             cls.html = extract_html(f.read())
 
     def test_doctype_present(self):
@@ -87,7 +87,7 @@ class TestFrontendResponsiveDesign(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        with open(TS_FILE, encoding="utf-8") as f:
+        with open(HTML_FILE, encoding="utf-8") as f:
             cls.html = extract_html(f.read())
 
     def test_media_query_mobile_600px(self):
@@ -147,7 +147,7 @@ class TestFrontendDesignTokens(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        with open(TS_FILE, encoding="utf-8") as f:
+        with open(HTML_FILE, encoding="utf-8") as f:
             cls.html = extract_html(f.read())
         # Extract :root block
         m = re.search(r':root\s*\{([^}]+)\}', cls.html, re.DOTALL)
@@ -203,7 +203,7 @@ class TestFrontendComponents(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        with open(TS_FILE, encoding="utf-8") as f:
+        with open(HTML_FILE, encoding="utf-8") as f:
             cls.html = extract_html(f.read())
 
     def test_header_component(self):
@@ -304,7 +304,7 @@ class TestFrontendJavaScript(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        with open(TS_FILE, encoding="utf-8") as f:
+        with open(HTML_FILE, encoding="utf-8") as f:
             cls.html = extract_html(f.read())
 
     def _js_section(self):
@@ -320,8 +320,11 @@ class TestFrontendJavaScript(unittest.TestCase):
                    "escapeHtml", "showToast"):
             self.assertIn(fn, js, f"JS function missing: {fn}")
 
-    def test_api_url_uses_template_variable(self):
-        self.assertIn("${apiUrl}", self.html)
+    def test_api_url_uses_runtime_config(self):
+        # API URL is now entered at runtime via the config panel (sessionStorage),
+        # not injected as a CDK template variable
+        self.assertIn("aws_monitor_api_url", self.html)
+        self.assertIn("sessionStorage", self.html)
 
     def test_api_key_runtime_configurable(self):
         # API key is now loaded at runtime (sessionStorage/URL hash), not hardcoded
@@ -410,7 +413,7 @@ class TestFrontendSecurity(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        with open(TS_FILE, encoding="utf-8") as f:
+        with open(HTML_FILE, encoding="utf-8") as f:
             cls.html = extract_html(f.read())
 
     def test_no_inline_event_xss_risk(self):
@@ -436,9 +439,10 @@ class TestFrontendSecurity(unittest.TestCase):
         self.assertIn("escapeHtml(text)", js)
 
     def test_api_url_relative_to_deployment(self):
-        """API URL is injected via CDK, not hardcoded."""
-        self.assertIn("${apiUrl}", self.html)
-        self.assertNotRegex(self.html, r'https://[a-z0-9]+\.execute-api\.')
+        """API URL is configured at runtime via sessionStorage, not hardcoded."""
+        self.assertIn("aws_monitor_api_url", self.html)
+        # No hardcoded execute-api URL in the source
+        self.assertNotRegex(self.html, r"let API_URL = 'https://[a-z0-9]+\.execute-api\.")
 
 
 class TestFrontendAccessibility(unittest.TestCase):
@@ -446,7 +450,7 @@ class TestFrontendAccessibility(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        with open(TS_FILE, encoding="utf-8") as f:
+        with open(HTML_FILE, encoding="utf-8") as f:
             cls.html = extract_html(f.read())
 
     def test_lang_attribute_on_html(self):

@@ -1,6 +1,6 @@
 # 🚀 AWS Monitor Agent — Solución de Monitoreo Inteligente con IA
 
-> **Empresa:** 3htp &nbsp;|&nbsp; **Tecnología:** Amazon Bedrock + Claude 3.5 Haiku &nbsp;|&nbsp; **Estado:** POC Completada ✅ &nbsp;|&nbsp; **Multi-región:** 29 regiones AWS
+> **Empresa:** 3htp &nbsp;|&nbsp; **Tecnología:** Amazon Bedrock + Claude Haiku 4.5 &nbsp;|&nbsp; **Estado:** POC Completada ✅ &nbsp;|&nbsp; **Multi-región:** 29 regiones AWS
 
 ---
 
@@ -31,14 +31,15 @@ En infraestructuras AWS con múltiples servicios corriendo en paralelo, el equip
 
 | Requisito del cliente | Estado | Detalle |
 |---|---|---|
-| Agente que se conecte a AWS y monitoree | ✅ Implementado | Bedrock Agent con 6 acciones de monitoreo en tiempo real |
+| Agente que se conecte a AWS y monitoree | ✅ Implementado | Bedrock Agent con 7 acciones de monitoreo en tiempo real |
 | Frontend de chat accesible desde browser | ✅ Implementado | Chat UI estático en S3 + CloudFront (HTTPS global) |
 | Análisis de salud general | ✅ Implementado | `get_overall_health` retorna status + recomendaciones |
-| Lenguaje natural (sin comandos técnicos) | ✅ Implementado | Claude 3.5 Haiku interpreta y responde en español o inglés |
+| Lenguaje natural (sin comandos técnicos) | ✅ Implementado | Claude Haiku 4.5 interpreta y responde en español o inglés |
 | Arquitectura serverless en AWS | ✅ Implementado | 100% serverless — Lambda, API Gateway, Bedrock, CloudFront |
 | Seguridad — sin credenciales expuestas | ✅ Implementado | IAM Roles, API Key, rate limiting, sin access keys en código |
 | Diagnóstico histórico de logs | ✅ Implementado | CloudWatch Logs Insights — búsqueda por patrones y errores |
 | Trazas de peticiones distribuidas | ✅ Implementado | AWS X-Ray — latencia p99, faults, root cause por servicio |
+| Inventario de software en EC2 (SSM) | ✅ Implementado | SSM Inventory — SO, apps, versiones, config de red (requiere SSM Agent) |
 | Monitoreo multi-región | ✅ Implementado | 29 regiones AWS — especifica la región en la pregunta o usa el default us-east-1 |
 
 ---
@@ -170,6 +171,10 @@ En infraestructuras AWS con múltiples servicios corriendo en paralelo, el equip
               │  │     AWS X-Ray Traces 🆕          │ │
               │  │  (latencia p99, faults, errores) │ │
               │  └──────────────────────────────────┘ │
+              │  ┌──────────────────────────────────┐ │
+              │  │     AWS SSM Inventory 🆕         │ │
+              │  │  (SO, apps, versiones, red)      │ │
+              │  └──────────────────────────────────┘ │
               └──────────────────────────────────────┘
                                  │
                     ┌────────────┴────────────┐
@@ -180,6 +185,7 @@ En infraestructuras AWS con múltiples servicios corriendo en paralelo, el equip
                     │   • CloudWatch alarms   │
                     │   • CloudWatch Logs     │
                     │   • X-Ray traces        │
+                    │   • SSM Inventory       │
                     └─────────────────────────┘
 ```
 
@@ -293,7 +299,7 @@ El agente puede **consultar y analizar los logs históricos** de cualquier grupo
 
 ---
 
-### 6. AWS X-Ray — Trazas de Peticiones Distribuidas 🆕
+### 6. AWS X-Ray — Trazas de Peticiones Distribuidas
 
 El agente puede consultar **las trazas de X-Ray** para identificar cuellos de botella, faults y errores en flujos de peticiones que pasan por múltiples servicios.
 
@@ -323,9 +329,39 @@ El agente puede consultar **las trazas de X-Ray** para identificar cuellos de bo
 
 ---
 
-## 🤖 ¿Por qué Amazon Bedrock + Claude 3.5 Haiku?
+### 7. AWS SSM Inventory — Inventario de Instancias EC2 🆕
 
-La solución usa **Amazon Bedrock Agents** con **Claude 3.5 Haiku** como motor de inteligencia. Esto no es solo un chatbot — es un agente que:
+El agente puede consultar el **inventario de software y configuración** de las instancias EC2 gestionadas por AWS Systems Manager. Permite saber qué sistema operativo, aplicaciones y versiones de software están instaladas en cada servidor sin necesidad de conectarse por SSH.
+
+| Dato reportado | Ejemplo |
+|---|---|
+| Sistema operativo | `Amazon Linux 2 / Windows Server 2022` |
+| Versión del SO | `5.10.234` |
+| Aplicaciones instaladas | `nginx 1.24.0`, `nodejs 20.11.0`, `postgresql 15.4` |
+| Componentes AWS | `AmazonCloudWatchAgent 1.300040.0` |
+| Configuración de red | Interfaces, IPs, MACs, gateway, DNS |
+| Estado del SSM Agent | `Online` / `Offline` |
+| Versión del SSM Agent | `3.2.0` |
+
+**Preguntas que puede responder:**
+- _"¿Qué sistema operativo tiene la instancia i-0abc123?"_
+- _"¿Qué versión de nginx está instalada en mis servidores?"_
+- _"¿Cuáles instancias tienen el CloudWatch Agent instalado?"_
+- _"Muéstrame todas las aplicaciones instaladas en prod-api-server"_
+- _"¿Qué configuración de red tiene la instancia de producción?"_
+
+**Prerequisitos para usarlo:**
+1. **SSM Agent** instalado y corriendo en la instancia EC2 (pre-instalado en AMIs Amazon Linux 2/2023 y Windows Server 2016+)
+2. IAM Role de la instancia EC2 debe incluir la política `AmazonSSMManagedInstanceCore`
+3. La instancia debe poder alcanzar los endpoints SSM (por internet o VPC endpoints)
+
+> **Nota:** SSM Inventory es gratuito. No tiene costo adicional más allá del tráfico de red normal.
+
+---
+
+## 🤖 ¿Por qué Amazon Bedrock + Claude Haiku 4.5?
+
+La solución usa **Amazon Bedrock Agents** con **Claude Haiku 4.5** como motor de inteligencia. Esto no es solo un chatbot — es un agente que:
 
 | Capacidad | Qué significa en la práctica |
 |---|---|
@@ -337,7 +373,7 @@ La solución usa **Amazon Bedrock Agents** con **Claude 3.5 Haiku** como motor d
 | **Encadenamiento de herramientas** | Si detecta una Lambda con errores, proactivamente consulta sus logs para encontrar la causa raíz |
 | **Seguridad integrada** | 6 restricciones en system prompt: no revela configs, no ejecuta acciones destructivas |
 
-**Claude 3.5 Haiku** es el modelo más rápido y eficiente de Anthropic, ideal para consultas operacionales donde la velocidad importa. Para producción con análisis más complejos, se puede escalar a **Claude 3.5 Sonnet** con un solo cambio de configuración.
+**Claude Haiku 4.5** es el modelo más rápido y eficiente de Anthropic, ideal para consultas operacionales donde la velocidad importa. Para producción con análisis más complejos, se puede escalar a **Claude Sonnet 4.5** con un solo cambio de configuración.
 
 ---
 
@@ -352,6 +388,7 @@ La arquitectura está diseñada para **escalar sin reescribir código**. Agregar
 | ✅ CloudWatch Alarms | Estado, métrica, threshold | **Ya implementado** |
 | ✅ CloudWatch Logs Insights | Errores, patrones, frecuencias históricas | **Ya implementado** |
 | ✅ AWS X-Ray | Latencia p99, faults, errores por servicio | **Ya implementado** |
+| ✅ AWS SSM Inventory | SO, apps instaladas, versiones, config de red | **Ya implementado** |
 | 🔜 RDS | Estado, conexiones, storage | ~1 hora |
 | 🔜 ECS / EKS | Tasks corriendo, estado de pods | ~2 horas |
 | 🔜 S3 | Tamaño de buckets, requests | ~1 hora |
@@ -434,7 +471,7 @@ La POC incorpora controles de seguridad en todas las capas. Se realizó una audi
 │              TECNOLOGÍAS UTILIZADAS                 │
 ├──────────────────┬──────────────────────────────────┤
 │ Infraestructura  │ AWS CDK v2 (TypeScript)          │
-│ Modelo IA        │ Claude 3.5 Haiku (Anthropic)     │
+│ Modelo IA        │ Claude Haiku 4.5 (Anthropic)     │
 │ Agente           │ Amazon Bedrock Agents            │
 │ Backend          │ AWS Lambda Python 3.12           │
 │ Frontend         │ HTML/JS estático                 │
@@ -447,7 +484,7 @@ La POC incorpora controles de seguridad en todas las capas. Se realizó una audi
 │ Seguridad        │ AWS IAM Roles                    │
 │ Deploy           │ AWS CDK deploy (1 comando)       │
 ├──────────────────┴──────────────────────────────────┤
-│ Tests: 241 tests pasando (unit + integration + e2e) │
+│ Tests: 281 tests pasando (unit + integration + e2e) │
 │ Región: us-east-1 · Auth: IAM (sin access keys)     │
 └─────────────────────────────────────────────────────┘
 ```
@@ -501,6 +538,8 @@ Y puede hacer preguntas como estas en el chat:
 | _"¿Por qué están lentas las peticiones?"_ | Análisis X-Ray: servicio más lento, latencia p99, trazas con fault |
 | _"¿Hay faults en las trazas de la última hora?"_ | Resumen X-Ray: total faults, errores, throttles y servicio origen |
 | _"¿Cuál es la latencia p99 de hoy?"_ | Percentil 99 de duración calculado sobre las últimas trazas X-Ray |
+| _"¿Qué SO tiene la instancia i-0abc123?"_ | Nombre, versión del SO y estado del SSM Agent vía SSM Inventory |
+| _"¿Qué aplicaciones tiene instaladas prod-api-server?"_ | Lista de apps con versión, publicador y fecha de instalación |
 | _"¿Cuántas funciones Lambda tengo?"_ | Count total + breakdown por estado de salud |
 
 ---
@@ -510,25 +549,26 @@ Y puede hacer preguntas como estas en el chat:
 | Entregable | Estado |
 |---|---|
 | Código CDK completo (2 stacks) | ✅ Listo |
-| Lambda action handler (6 acciones) | ✅ Listo |
+| Lambda action handler (7 acciones) | ✅ Listo |
 | Frontend chat UI con panel de configuración API Key | ✅ Listo |
 | Diagrama de arquitectura | ✅ Listo |
 | Documentación técnica (PPTX) | ✅ Listo |
 | Seguridad (API Key, rate limiting, system prompt) | ✅ Listo |
 | CloudWatch Logs Insights (análisis histórico de logs) | ✅ Listo |
 | AWS X-Ray (trazas distribuidas, latencia p99) | ✅ Listo |
-| Suite de tests (246 tests — unit/integration/e2e) | ✅ Listo |
-| Script de validación pre-deploy (12 checks) | ✅ Listo |
+| SSM Inventory (SO, apps, versiones, config red) | ✅ Listo |
+| Suite de tests (281 tests — unit/integration/e2e) | ✅ Listo |
+| Script de validación pre-deploy (14 checks) | ✅ Listo |
 | **Listo para deploy en AWS** | ⏳ Pendiente habilitación modelo Bedrock |
 
 ### Próximo paso para ir a producción:
 
 ```bash
-# 1. Habilitar Claude 3.5 Haiku en AWS Console → Bedrock → Model access (us-east-1)
+# 1. Habilitar Claude Haiku 4.5 en AWS Console → Bedrock → Model access (us-east-1)
 # 2. Crear nueva Access Key y configurar credenciales
 
 # 3. Validar credenciales y permisos
-python validate_aws_access.py   # → 12/12 PASS
+python validate_aws_access.py   # → 14/14 PASS
 
 # 4. Deploy
 npm install
@@ -562,11 +602,11 @@ Existen dos enfoques válidos para construir un agente de monitoreo AWS, y ambos
 |---|---|
 | **Stack** | Bedrock Agents + Lambda + API Gateway + CloudFront + CDK TypeScript |
 | **Frontend** | Chat UI incluido — HTML/JS estático en S3 + CloudFront |
-| **Acceso a AWS** | Lambda con IAM Role; 6 acciones de lectura (EC2, Lambda, CloudWatch, Logs, X-Ray) |
+| **Acceso a AWS** | Lambda con IAM Role; 7 acciones de lectura (EC2, Lambda, CloudWatch, Logs, X-Ray, SSM) |
 | **Deploy** | Un comando: `npm run deploy` — listo en ~5 minutos |
 | **Infraestructura a mantener** | Cero servidores; todo serverless y gestionado por AWS |
 | **Costo mensual** | < $2 para un equipo de 5 personas |
-| **Modelo LLM** | Claude 3.5 Haiku vía Bedrock Agents (inference profile) |
+| **Modelo LLM** | Claude Haiku 4.5 vía Bedrock Agents (inference profile) |
 | **Actualizaciones** | Agregar acción nueva = un archivo Python + una línea en OpenAPI + redeploy |
 
 **¿Qué resuelve hoy mismo?**
@@ -622,7 +662,7 @@ Estas soluciones no compiten — resuelven problemas distintos para audiencias d
 | **Perfil de usuario** | No técnico — solo escribe en el chat | Técnico — configura, extiende, integra |
 | **Tiempo al primer uso** | 5 minutos post-deploy | 2-4 semanas para MVP completo |
 | **Curva de mantenimiento** | Muy baja — CDK gestiona todo | Media-alta — Docker, Runtime, MCP ecosystem |
-| **Cobertura de servicios** | EC2, Lambda, CloudWatch, Logs, X-Ray (6 acciones) | Potencialmente todo AWS (~60+ tools en AWS MCP Server) |
+| **Cobertura de servicios** | EC2, Lambda, CloudWatch, Logs, X-Ray, SSM Inventory (7 acciones) | Potencialmente todo AWS (~60+ tools en AWS MCP Server) |
 | **Costo** | < $2/mes equipo pequeño | Mayor — Runtime por hora + contenedores |
 | **Modelo de extensión** | Agregar función Python + endpoint OpenAPI | Agregar MCP server (contenedor externo) |
 | **Frontend** | ✅ Incluido y desplegado | ❌ Requiere desarrollo separado |
@@ -701,4 +741,4 @@ Los servicios globales de AWS (IAM, Route 53, CloudFront, S3 global) no tienen r
 
 ---
 
-*Documento actualizado el 2026-06-04 · AWS Monitor Agent POC · 3htp · asilveira@3htp.com*
+*Documento actualizado el 2026-06-11 · AWS Monitor Agent POC · 3htp · asilveira@3htp.com*

@@ -2,7 +2,10 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <title>AWS Monitor Agent</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -33,7 +36,11 @@
       --transition: 0.18s ease;
     }
 
-    html, body { height: 100%; }
+    html {
+      height: 100%;
+      /* iOS Safari: prevent elastic scroll on body */
+      height: -webkit-fill-available;
+    }
 
     body {
       background: var(--bg);
@@ -41,7 +48,11 @@
       font-family: var(--font);
       display: flex;
       flex-direction: column;
+      /* dvh = dynamic viewport height — accounts for browser chrome on mobile.
+         Falls back to 100vh on older browsers, then to -webkit-fill-available for iOS 14 */
       height: 100vh;
+      height: -webkit-fill-available;
+      height: 100dvh;
       overflow: hidden;
       font-size: 14px;
       -webkit-font-smoothing: antialiased;
@@ -211,7 +222,10 @@
     /* Footer */
     .footer-bar {
       background: var(--surface); border-top: 1px solid var(--border);
-      padding: 12px 20px; flex-shrink: 0;
+      padding: 12px 20px;
+      /* safe-area-inset-bottom: reserve space for iPhone Home Bar */
+      padding-bottom: max(12px, env(safe-area-inset-bottom));
+      flex-shrink: 0;
     }
     .input-row { display: flex; gap: 8px; align-items: flex-end; }
     .input-wrapper {
@@ -256,11 +270,60 @@
     }
     @keyframes toast-in { from { opacity: 0; transform: translate(-50%, 8px); } }
 
+    /* ===== MOBILE RESPONSIVE (≤600px) ===== */
     @media (max-width: 600px) {
       .header-badges { display: none; }
-      .capability-grid { grid-template-columns: 1fr; }
+      /* Header */
+      header { padding: 0 12px; height: 50px; }
+      .header-title h1 { font-size: 14px; }
+      .header-title p  { display: none; }
+      .cfg-btn { font-size: 18px; padding: 6px 10px; min-width: 36px; min-height: 36px; }
+
+      /* Chat */
+      .chat-container { padding: 12px; gap: 10px; }
       .message { max-width: 95%; }
-      .chat-container { padding: 14px 16px; }
+      .capability-grid { grid-template-columns: 1fr; gap: 6px; }
+      .welcome-card { padding: 14px 16px; }
+
+      /* Suggestions: horizontal scroll instead of wrapping (saves vertical space) */
+      .suggestions {
+        padding: 0 12px 8px;
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;          /* Firefox */
+      }
+      .suggestions::-webkit-scrollbar { display: none; }
+      .suggestions-label { display: none; }
+      .suggestion-btn { flex-shrink: 0; font-size: 12px; padding: 6px 12px; }
+
+      /* Footer */
+      .footer-bar {
+        padding: 10px 12px;
+        /* iPhone Home Bar safe area */
+        padding-bottom: max(10px, env(safe-area-inset-bottom));
+      }
+      .input-row { gap: 6px; }
+
+      /* CRITICAL: font-size ≥ 16px prevents iOS Safari from auto-zooming on focus */
+      textarea { font-size: 16px; padding: 9px 12px; }
+
+      /* Larger touch target for send button (min 44×44 recommended by Apple HIG) */
+      .send-btn { width: 44px; height: 44px; border-radius: 10px; flex-shrink: 0; }
+      .send-btn svg { width: 18px; height: 18px; }
+
+      .footer-meta { margin-top: 5px; }
+      .footer-meta #sessionInfo { display: none; }
+
+      /* Config panel */
+      .config-inner { font-size: 12px; }
+      .config-row input { font-size: 16px; } /* prevent iOS zoom in config inputs too */
+    }
+
+    /* Very small screens (≤360px — Galaxy S series compact) */
+    @media (max-width: 360px) {
+      .send-btn { width: 40px; height: 40px; }
+      .chat-container { padding: 10px; }
     }
   </style>
 </head>
@@ -279,6 +342,7 @@
     <span class="badge">CloudWatch</span>
     <span class="badge">Logs Insights</span>
     <span class="badge">X-Ray</span>
+    <span class="badge">SSM</span>
   </div>
   <div class="header-right">
     <div class="status-indicator">
@@ -333,6 +397,10 @@
         <span class="cap-icon">&#128301;</span>
         <div class="cap-text"><strong>X-Ray Traces</strong><span>Trazas distribuidas, latencia p99, faults</span></div>
       </div>
+      <div class="cap-item">
+        <span class="cap-icon">&#128187;</span>
+        <div class="cap-text"><strong>SSM Inventory</strong><span>SO, apps instaladas, versiones, config de red (requiere SSM Agent)</span></div>
+      </div>
     </div>
   </div>
 </div>
@@ -345,6 +413,7 @@
   <button class="suggestion-btn" onclick="sendSuggestion('Que funciones Lambda tienen errores?')">&#9889; Lambda errors</button>
   <button class="suggestion-btn" onclick="sendSuggestion('Analiza los errores recientes en los logs de la ultima hora')">&#128203; Analizar logs</button>
   <button class="suggestion-btn" onclick="sendSuggestion('Muestrame las trazas X-Ray con faults en las ultimas 2 horas')">&#128301; X-Ray traces</button>
+  <button class="suggestion-btn" onclick="sendSuggestion('Que aplicaciones y versiones tiene instaladas mi instancia EC2?')">&#128187; SSM Inventory</button>
 </div>
 
 <div class="footer-bar">
@@ -390,6 +459,20 @@
 
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+  });
+
+  // Mobile: hide suggestions when keyboard opens to free vertical space
+  const isMobile = () => window.innerWidth <= 600;
+  const suggBox  = document.getElementById('suggestions');
+  input.addEventListener('focus', () => {
+    if (isMobile() && suggBox) suggBox.style.display = 'none';
+  });
+  input.addEventListener('blur', () => {
+    // Only restore suggestions if chat area has no messages beyond welcome card
+    if (isMobile() && suggBox && !busy) {
+      const msgs = document.querySelectorAll('.message');
+      if (msgs.length === 0) suggBox.style.display = '';
+    }
   });
 
   function toggleConfig() {
@@ -445,7 +528,7 @@
     bbl.className = 'bubble';
     bbl.innerHTML = role === 'assistant' ? formatMarkdown(text) : escapeHtml(text);
     wrap.appendChild(av);
-    wrap.appendChild(bbl);
+    wrap.append(bbl);
     chat.appendChild(wrap);
     chat.scrollTop = chat.scrollHeight;
   }

@@ -353,3 +353,91 @@ class TestCompleteFlowScenarios(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestSsmInventoryContract(unittest.TestCase):
+    """E2E contract tests for get_ssm_inventory — Bedrock 1.0 envelope + security."""
+
+    def _invoke(self, params=None):
+        from unittest.mock import MagicMock
+
+        def make_paginator(pages):
+            pag = MagicMock()
+            pag.paginate.return_value = iter(pages)
+            return pag
+
+        ssm = MagicMock()
+        inst_pag = make_paginator([{"InstanceInformationList": [{
+            "InstanceId": "i-0abc123", "ComputerName": "ip-10-0-0-1",
+            "PlatformType": "Linux", "PlatformName": "Amazon Linux 2",
+            "PlatformVersion": "2", "AgentVersion": "3.2.0",
+            "IPAddress": "10.0.0.1", "PingStatus": "Online",
+            "LastPingDateTime": __import__('datetime').datetime(2026, 6, 1, 0, 0, 0),
+            "AssociationStatus": "Success", "ResourceType": "ManagedInstance",
+        }]}])
+        inv_pag = make_paginator([{"Entities": []}])
+
+        def pag_side_effect(op):
+            return inst_pag if op == "describe_instance_information" else inv_pag
+
+        ssm.get_paginator.side_effect = pag_side_effect
+
+        with patch("index.boto3") as mock_boto:
+            mock_boto.client.return_value = ssm
+            event = bedrock_event("get_ssm_inventory", params or [])
+            return index.handler(event, None)
+
+    def test_response_is_valid_bedrock_1_0_envelope(self):
+        r = self._invoke()
+        assert_contract(r)
+
+    def test_httpmethod_echoed_back(self):
+        # bedrock_event helper sends httpMethod=GET; handler must echo it back
+        r = self._invoke()
+        self.assertEqual(r["response"]["httpMethod"], "GET")
+
+    def test_api_path_echoed_back(self):
+        r = self._invoke()
+        self.assertEqual(r["response"]["apiPath"], "/get_ssm_inventory")
+
+    def test_action_group_is_monitor_actions(self):
+        r = self._invoke()
+        self.assertEqual(r["response"]["actionGroup"], "MonitorActions")
+
+    def test_response_body_has_managed_instance_count(self):
+        r = self._invoke()
+        body = assert_contract(r)
+        self.assertIn("managed_instance_count", body)
+
+    def test_response_body_has_instances_list(self):
+        r = self._invoke()
+        body = assert_contract(r)
+        self.assertIsInstance(body["instances"], list)
+
+    def test_region_present_in_response(self):
+        r = self._invoke()
+        body = assert_contract(r)
+        self.assertIn("region", body)
+
+    def test_invalid_inventory_type_returns_400(self):
+        r = self._invoke(params=[{"name": "inventory_type", "value": "BAD_TYPE"}])
+        self.assertEqual(r["response"]["httpStatusCode"], 400)
+
+    def test_invalid_region_returns_400(self):
+        r = self._invoke(params=[{"name": "region", "value": "not-a-region"}])
+        self.assertEqual(r["response"]["httpStatusCode"], 400)
+
+    def test_note_field_explains_prerequisites(self):
+        r = self._invoke()
+        body = assert_contract(r)
+        self.assertIn("SSM Agent", body["note"])
+
+    def test_no_arn_or_account_in_response(self):
+        """Security: response must not leak ARNs or account IDs."""
+        r = self._invoke()
+        text = json.dumps(r)
+        self.assertNotRegex(text, r'arn:aws:[a-z]+:[a-z0-9-]+:\d{12}')
+
+    def test_all_inventory_type_accepted(self):
+        r = self._invoke(params=[{"name": "inventory_type", "value": "ALL"}])
+        self.assertEqual(r["response"]["httpStatusCode"], 200)

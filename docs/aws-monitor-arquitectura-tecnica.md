@@ -2,7 +2,7 @@
 
 > **Audiencia:** Desarrolladores y arquitectos que necesitan entender y explicar la solución
 > **Nivel:** Técnico intermedio-avanzado
-> **Última actualización:** 2026-06-04 — soporte multi-región en las 6 acciones (29 regiones AWS), 240 tests pasando
+> **Última actualización:** 2026-06-11 — SSM Inventory integrado (7 acciones), Claude Haiku 4.5, 281 tests pasando, 14 checks validate_aws_access.py
 > **Complementa:** `aws-monitor-presentacion.md` (versión de negocio) · `aws-monitor-dev-guide.pptx` (visual)
 
 ---
@@ -41,8 +41,8 @@ Usuario (browser)
 │  Amazon Bedrock Agent  (aws-monitor-agent)      │
 │  alias: live                                    │
 │  ┌──────────────────────────────────────────┐   │
-│  │  Claude 3.5 Haiku                        │   │
-│  │  us.anthropic.claude-3-5-haiku-20241022  │   │
+│  │  Claude Haiku 4.5                        │   │
+│  │  us.anthropic.claude-haiku-4-5-20251001  │   │
 │  │  • Razonamiento ReAct                    │   │
 │  │  • Selección automática de herramienta   │   │
 │  │  • Síntesis de respuesta natural         │   │
@@ -54,7 +54,7 @@ Usuario (browser)
                           ▼
 ┌─────────────────────────────────────────────────┐
 │  Lambda Actions  (aws-monitor-agent-actions)    │
-│  Python 3.12 — 6 acciones de monitoreo          │
+│  Python 3.12 — 7 acciones de monitoreo          │
 │  Todas aceptan parámetro opcional "region"      │
 │  • get_overall_health  (region)                 │
 │  • get_ec2_health      (state, region)          │
@@ -62,12 +62,13 @@ Usuario (browser)
 │  • get_cloudwatch_alarms (state, region)        │
 │  • get_logs_analysis   (log_group, region)      │
 │  • get_xray_traces     (hours, region)          │
-└──────┬──────┬──────┬──────┬──────┬─────────────┘
-       │      │      │      │      │
-       ▼      ▼      ▼      ▼      ▼
-  AWS EC2   CW    Lambda   CW    X-Ray
-  Describe Alarms  List   Logs   Trace
-  Inst.    +Met.  +Metr. Insig. Summ.
+│  • get_ssm_inventory   (instance_id, type, region)│
+└──────┬──────┬──────┬──────┬──────┬──────┬──────┘
+       │      │      │      │      │      │
+       ▼      ▼      ▼      ▼      ▼      ▼
+  AWS EC2   CW    Lambda   CW    X-Ray  SSM
+  Describe Alarms  List   Logs   Trace  Inv.
+  Inst.    +Met.  +Metr. Insig. Summ.  (Fleet)
   (any region — boto3 per-request client)
 ```
 
@@ -75,9 +76,9 @@ Usuario (browser)
 
 ## Qué puede responder el agente — capacidad actual
 
-Esta tabla refleja el estado tras la implementación de `get_logs_analysis` y `get_xray_traces`:
+Esta tabla refleja el estado tras la implementación de `get_logs_analysis`, `get_xray_traces` y `get_ssm_inventory`:
 
-| Pregunta del usuario | Antes (4 acciones) | Ahora (6 acciones) |
+| Pregunta del usuario | Antes (4 acciones) | Ahora (7 acciones) |
 |---|---|---|
 | ¿Cuántos errores tuve? | ✅ | ✅ |
 | ¿Qué dice el mensaje de error? | ❌ | ✅ `get_logs_analysis` |
@@ -86,6 +87,9 @@ Esta tabla refleja el estado tras la implementación de `get_logs_analysis` y `g
 | ¿El problema es en mi código o en una dependencia? | ❌ | Parcial → ✅ |
 | ¿Cuánto tarda cada paso de la request? | ❌ | ✅ `duration_s` por trace |
 | ¿Qué errores son los más frecuentes? | ❌ | ✅ eventos con `@message` |
+| ¿Qué SO tiene la instancia? | ❌ | ✅ `get_ssm_inventory` |
+| ¿Qué apps y versiones están instaladas? | ❌ | ✅ `get_ssm_inventory` |
+| ¿Qué configuración de red tiene la instancia? | ❌ | ✅ `get_ssm_inventory` |
 
 **Ejemplo concreto de salto de capacidad:**
 
@@ -257,7 +261,7 @@ Bedrock necesita saber qué herramientas existen. El archivo `lib/monitor-openap
 ### El system prompt
 
 Define scope, herramientas disponibles, comportamiento multi-región y 6 restricciones de seguridad:
-1. `OUT OF SCOPE` — solo EC2, Lambda, CloudWatch, Logs, X-Ray
+1. `OUT OF SCOPE` — solo EC2, Lambda, CloudWatch, Logs, X-Ray, SSM Inventory
 2. `NO DESTRUCTIVE ACTIONS` — no sugiere terminar/eliminar/modificar recursos
 3. `NO INTERNAL CONFIG DISCLOSURE` — no revela ARNs, account IDs ni env vars
 4. `NO PROMPT INJECTION` — bloquea intentos de override del system prompt
@@ -284,6 +288,7 @@ ACTIONS = {
     "get_overall_health":    get_overall_health,
     "get_logs_analysis":     get_logs_analysis,
     "get_xray_traces":       get_xray_traces,
+    "get_ssm_inventory":     get_ssm_inventory,
 }
 
 def handler(event, context):
@@ -502,6 +507,74 @@ for page in paginator.paginate(
 
 **Error manejado:** `AccessDeniedException` → HTTP 403 (falta permiso X-Ray en el IAM role).
 
+#### `get_ssm_inventory` — inventario de software e instancias gestionadas ← nuevo
+
+Consulta AWS Systems Manager para obtener información de inventario de las instancias EC2 que tienen SSM Agent instalado.
+
+```python
+# Parámetros:
+#   instance_id     (opcional) — filtrar por ID de instancia específica
+#   inventory_type  (opcional) — uno de: AWS:InstanceInformation (default),
+#                    AWS:Application, AWS:AWSComponent, AWS:Network,
+#                    AWS:WindowsUpdate, AWS:PatchSummary, ALL
+#   region          (opcional) — default us-east-1
+
+# Crea cliente SSM directamente (no via _make_clients)
+ssm = boto3.client("ssm", region_name=region)
+
+# Paso 1: obtener instancias gestionadas
+paginator = ssm.get_paginator("describe_instance_information")
+# Paso 2: obtener inventario
+paginator2 = ssm.get_paginator("get_inventory")
+
+# Respuesta (con instancias):
+{
+    "region": "us-east-1",
+    "managed_instance_count": 3,
+    "inventory_type_queried": "AWS:InstanceInformation",
+    "instances": [
+        {
+            "instance_id": "i-0abc123",
+            "computer_name": "ip-10-0-0-5",
+            "platform_type": "Linux",
+            "platform_name": "Amazon Linux 2",
+            "platform_version": "2",
+            "agent_version": "3.2.0",
+            "ip_address": "10.0.0.5",
+            "ping_status": "Online",
+            "last_ping": "2026-06-11T10:30:00Z"
+        }
+    ],
+    "inventory": [ ... ],   # datos específicos del inventory_type
+    "note": "SSM Inventory requiere SSM Agent instalado y rol AmazonSSMManagedInstanceCore."
+}
+
+# Respuesta (sin instancias):
+{
+    "managed_instance_count": 0,
+    "message": "No managed instances found. Ensure SSM Agent is installed and running, and the EC2 instance has the AmazonSSMManagedInstanceCore IAM role."
+}
+```
+
+**Nota crítica de implementación:** `get_ssm_inventory` crea su cliente `boto3.client("ssm")` directamente en lugar de usar `_make_clients()`. Esto permite un patrón de mock distinto en los tests (patch de `index.boto3` en lugar de los clients preexistentes).
+
+**Prerequisitos en infraestructura:**
+- SSM Agent instalado y corriendo en la EC2 (pre-instalado en Amazon Linux 2/2023 y Windows Server 2016+)
+- IAM Role de la EC2 con política `AmazonSSMManagedInstanceCore`
+- Conectividad con endpoints SSM (internet o VPC endpoints)
+
+**Tipos de inventario soportados:**
+
+| Tipo | Qué devuelve |
+|---|---|
+| `AWS:InstanceInformation` (default) | SO, versión, agente SSM, IP, estado |
+| `AWS:Application` | Apps instaladas: nombre, versión, publicador |
+| `AWS:AWSComponent` | Componentes AWS: CloudWatch Agent, SSM Agent, etc. |
+| `AWS:Network` | Interfaces de red: IP, MAC, gateway, DNS |
+| `AWS:WindowsUpdate` | Actualizaciones de Windows pendientes/instaladas |
+| `AWS:PatchSummary` | Resumen de parches: instalados, pendientes, fallidos |
+| `ALL` | Consulta todos los tipos disponibles |
+
 ### Por qué paginators en todas las acciones
 
 ```python
@@ -532,7 +605,8 @@ ActionLambdaRole  (solo lectura — NUNCA puede modificar recursos)
 ├── cloudwatch:DescribeAlarms, cloudwatch:GetMetricStatistics, cloudwatch:ListMetrics
 ├── logs:DescribeLogGroups, logs:DescribeLogStreams, logs:GetLogEvents
 ├── logs:StartQuery, logs:GetQueryResults, logs:StopQuery   ← Logs Insights
-└── xray:GetTraceSummaries, xray:BatchGetTraces             ← X-Ray
+├── xray:GetTraceSummaries, xray:BatchGetTraces             ← X-Ray
+└── ssm:DescribeInstanceInformation, ssm:ListInventoryEntries, ssm:GetInventory  ← SSM Inventory
 
 BedrockAgentRole
 ├── bedrock:InvokeModel  (solo Haiku en us-east-1)
@@ -584,7 +658,7 @@ Durante la auditoría se detectaron dos archivos truncados en el sistema de arch
 
 ### Validación de inputs — detalle técnico
 
-Todos los parámetros de entrada de las 6 acciones Lambda están validados antes de usarlos:
+Todos los parámetros de entrada de las 7 acciones Lambda están validados antes de usarlos:
 
 ```python
 # log_group: formato estricto + longitud máxima
@@ -694,13 +768,14 @@ Pasos 9-13 se repiten → Claude incluye causa raíz en la respuesta
 | Logs Insights con polling | La API es asíncrona — `start_query` + `get_query_results` con timeout 25s |
 | X-Ray `Sampling: False` | Obtiene todas las trazas del período, no una muestra estadística |
 
-### ¿Por qué Claude 3.5 Haiku y no Sonnet?
+### ¿Por qué Claude Haiku 4.5 y no Sonnet?
 
 - **Más rápido** — respuestas en 1-2s vs 3-5s con Sonnet
 - **Más económico** — ~$0.001/consulta vs ~$0.005 con Sonnet
 - **Suficiente para monitoreo** — las preguntas operacionales no requieren razonamiento profundo
+- **Versión más reciente** — Haiku 4.5 (`us.anthropic.claude-haiku-4-5-20251001-v1:0`) es el modelo activo en us-east-1; Claude 3.5 Haiku y Claude 3.7 Sonnet quedaron marcados como Legacy
 
-Para análisis de causa raíz complejos con múltiples servicios interrelacionados → upgrade a Claude 3.5 Sonnet cambiando `foundationModel` en `monitor-agent-stack.ts`.
+Para análisis de causa raíz complejos con múltiples servicios interrelacionados → upgrade a Claude Sonnet 4.5 cambiando `foundationModel` en `monitor-agent-stack.ts`.
 
 ### ¿Por qué inference profile (`us.` prefijo)?
 
@@ -708,10 +783,18 @@ En `us-east-1`, AWS requiere inference profiles para modelos Claude:
 
 ```typescript
 // ❌ Incorrecto en us-east-1
-foundationModel: "anthropic.claude-3-5-haiku-20241022-v1:0"
+foundationModel: "anthropic.claude-haiku-4-5-20251001-v1:0"
 
-// ✅ Correcto en us-east-1
-foundationModel: "us.anthropic.claude-3-5-haiku-20241022-v1:0"
+// ✅ Correcto en us-east-1 (inference profile cross-region)
+foundationModel: "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+```
+
+Adicionalmente, la IAM policy del BedrockAgentRole debe usar el ARN completo con account ID (requisito para inference profiles con cross-region):
+
+```typescript
+// ✅ ARN correcto para inference profile
+`arn:aws:bedrock:us-east-1:369595298303:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0`
+// (nota: account ID 369595298303 es obligatorio en el ARN)
 ```
 
 ---
@@ -762,26 +845,26 @@ Servicios candidatos para la siguiente iteración: RDS, ECS/EKS, DynamoDB, S3, A
 
 ---
 
-## Suite de tests — 240 tests, 0 fallos
+## Suite de tests — 281 tests, 0 fallos
 
 ```bash
 python run_tests.py all
-# Ran 240 tests — OK (unit=176, e2e=30, integration=34)
+# 281 tests OK (unit=200+, e2e=42, integration=39)
 ```
 
 | Tipo | Archivo | Tests | Qué valida |
 |---|---|---|---|
-| Unit | `tests/unit/test_monitor_actions.py` | 91 | 6 acciones, multi-región, envelope Bedrock 1.0, error handling, Logs, X-Ray |
-| Unit | `tests/unit/test_frontend_html.py` | 85 | HTML del frontend — config panel, multi-región placeholder, sessionStorage |
-| Integration | `tests/integration/test_validator.py` | 34 | `validate_aws_access.py` — 12 checks: identity, IAM, Bedrock, Logs, X-Ray |
-| E2E | `tests/e2e/test_bedrock_contract.py` | 30 | Contrato Bedrock 1.0, multi-región, seguridad, escenarios de diagnóstico |
+| Unit | `tests/unit/test_monitor_actions.py` | ~107 | 7 acciones (incl. SSM), multi-región, envelope Bedrock 1.0, error handling, Logs, X-Ray |
+| Unit | `tests/unit/test_frontend_html.py` | ~85 | HTML del frontend — config panel, multi-región, sessionStorage, badge SSM |
+| Integration | `tests/integration/test_validator.py` | 39 | `validate_aws_access.py` — 14 checks: identity, IAM, Bedrock, Logs, X-Ray, SSM |
+| E2E | `tests/e2e/test_bedrock_contract.py` | 42 | Contrato Bedrock 1.0, multi-región, seguridad, SSM Inventory, diagnóstico |
 
 **Tests multi-región incluidos en `TestRegionValidation`:**
 - Región válida retorna HTTP 200 con campo `region` en respuesta
 - Región inválida retorna HTTP 400 con mensaje de error descriptivo
 - Sin parámetro → default `us-east-1`
 - Case insensitive: `US-EAST-1` → normalizado a `us-east-1`
-- Las 6 acciones respetan la región pasada
+- Las 7 acciones respetan la región pasada
 
 **Tests de escenario de diagnóstico en E2E** (clase `TestDiagnosticScenarios`):
 
@@ -837,9 +920,9 @@ Comparado con SaaS de monitoreo (Datadog ~$15-30/host/mes, New Relic ~$25/usuari
 ## Pendientes para producción
 
 ### Bloqueantes pre-deploy
-- Habilitar **Claude 3.5 Haiku** en AWS Console → Bedrock → Model access (us-east-1)
+- Habilitar **Claude Haiku 4.5** en AWS Console → Bedrock → Model access (us-east-1)
 - Rotar Access Key (`AKIA...REDACTED` — inactiva, crear nueva)
-- `python validate_aws_access.py` → confirmar 12/12 PASS
+- `python validate_aws_access.py` → confirmar 14/14 PASS
 
 ### Deploy
 ```bash
@@ -856,10 +939,11 @@ aws apigateway get-api-key --api-key <ApiKeyId> --include-value --region us-east
 ### Producción con usuarios externos
 - Reemplazar API Key por **Cognito User Pool + JWT Authorizer**
 - Habilitar **X-Ray active tracing** en Lambdas para que `get_xray_traces` tenga datos reales
+- Habilitar **SSM Agent + AmazonSSMManagedInstanceCore** en instancias EC2 para que `get_ssm_inventory` retorne datos
 - Revisar Usage Plan (1,000 req/día puede ser insuficiente)
 
 ### Opcionales
-- Upgrade a **Claude 3.5 Sonnet** para análisis de causa raíz más profundo
+- Upgrade a **Claude Sonnet 4.5** para análisis de causa raíz más profundo
 - Migrar REST API → **HTTP API** (costo -70%)
 - Agregar monitoreo de **RDS, ECS, DynamoDB**
 
@@ -875,11 +959,12 @@ aws apigateway get-api-key --api-key <ApiKeyId> --include-value --region us-east
 | `docs/aws-monitor-poc-vs-mcp.md` | Análisis comparativo: qué agrega Logs Insights y X-Ray |
 | `lib/monitor-agent-stack.ts` | CDK: Bedrock Agent + Lambda actions + IAM + S3 schema |
 | `lib/chat-frontend-stack.ts` | CDK: API Gateway + Lambda proxy + S3 + CloudFront |
-| `lambda/monitor-actions/index.py` | Handler Python: 6 acciones de monitoreo |
-| `lib/monitor-openapi.json` | Schema OpenAPI 3.0 — describe las 6 herramientas a Bedrock |
-| `validate_aws_access.py` | 12 checks pre-deploy de credenciales y permisos |
-| `run_tests.py` | Runner: `python run_tests.py all` → 162 tests |
+| `lambda/monitor-actions/index.py` | Handler Python: 7 acciones de monitoreo |
+| `lib/monitor-openapi.json` | Schema OpenAPI 3.0 — describe las 7 herramientas a Bedrock |
+| `docs/ssm-inventory.md` | Guía SSM: prerrequisitos, tipos de inventario, troubleshooting |
+| `validate_aws_access.py` | 14 checks pre-deploy de credenciales y permisos (incl. SSM) |
+| `run_tests.py` | Runner: `python run_tests.py all` → 281 tests |
 
 ---
 
-*Actualizado 2026-06-04 · AWS Monitor Agent — Arquitectura Técnica · Multi-región (29 regiones) · 240 tests · 3htp*
+*Actualizado 2026-06-11 · AWS Monitor Agent — Arquitectura Técnica · Multi-región (29 regiones) · 7 acciones · 281 tests · 3htp*

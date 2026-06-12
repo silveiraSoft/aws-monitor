@@ -21,8 +21,11 @@ const env = {
 
 const agentStack = new MonitorAgentStack(app, 'AwsMonitorAgentStack', { env });
 
-new ChatFrontendStack(app, 'AwsMonitorFrontendStack', {
+// agentAliasId is NOT passed — ChatFrontendStack imports it via Fn.importValue('AwsMonitorAgentAliasId').
+// This prevents CDK from auto-generating a cross-stack export tied to the alias resource
+// logical ID, which would break deploys whenever the alias resource is replaced.
+const frontendStack = new ChatFrontendStack(app, 'AwsMonitorFrontendStack', {
   env,
   agentId: agentStack.agentId,
-  agentAliasId: agentStack.agentAliasId,
 });
+frontendStack.addDependency(agentStack);

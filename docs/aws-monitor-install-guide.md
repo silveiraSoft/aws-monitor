@@ -2,7 +2,7 @@
 
 > **Proyecto:** AWS Monitor Agent · Empresa: 3htp · Cuenta AWS: `369595298303` · Deploy en: `us-east-1` · Monitoreo: **29 regiones AWS**
 > **Audiencia:** Desarrolladores que van a instalar, desplegar o mantener esta solución
-> **Última actualización:** 2026-06-04 — soporte multi-región implementado
+> **Última actualización:** 2026-06-11 — SSM Inventory integrado (7 acciones), Claude Haiku 4.5, 281 tests, 14 checks
 
 ---
 
@@ -150,7 +150,7 @@ El usuario (o role) que ejecuta el deploy debe tener permisos en estos servicios
 
 1. Ir a **AWS Console → Amazon Bedrock → Model access** (región `us-east-1`)
 2. Clic en **Manage model access**
-3. Buscar **Claude 3.5 Haiku** (Anthropic)
+3. Buscar **Claude Haiku 4.5** (Anthropic)
 4. Marcar el checkbox y clic **Save changes**
 5. Esperar hasta que el estado cambie a **Access granted** (puede tardar 1-5 minutos)
 
@@ -163,8 +163,8 @@ El CDK crea automáticamente estos roles durante el deploy:
 | Role | Permisos otorgados | Principio que lo asume |
 |---|---|---|
 | `ChatLambdaRole` | `bedrock:InvokeAgent` solamente | `lambda.amazonaws.com` |
-| `ActionLambdaRole` | Solo lectura en EC2, Lambda, CloudWatch, Logs, X-Ray | `lambda.amazonaws.com` |
-| `AmazonBedrockExecutionRoleForAgents_AwsMonitor` | `bedrock:InvokeModel` (solo Haiku) + `s3:GetObject` (solo schema bucket) | `bedrock.amazonaws.com` |
+| `ActionLambdaRole` | Solo lectura en EC2, Lambda, CloudWatch, Logs, X-Ray, SSM | `lambda.amazonaws.com` |
+| `AmazonBedrockExecutionRoleForAgents_AwsMonitor` | `bedrock:InvokeModel` (solo Haiku 4.5) + `s3:GetObject` (solo schema bucket) | `bedrock.amazonaws.com` |
 
 **Ninguno de estos roles tiene permisos de escritura.** No pueden crear, modificar ni eliminar recursos de AWS.
 
@@ -194,10 +194,10 @@ aws-monitor/
 ├── lib/
 │   ├── monitor-agent-stack.ts        ← stack del agente Bedrock
 │   ├── chat-frontend-stack.ts        ← stack del frontend + API
-│   └── monitor-openapi.json          ← schema de las 6 herramientas
+│   └── monitor-openapi.json          ← schema de las 7 herramientas
 ├── lambda/
 │   └── monitor-actions/
-│       └── index.py                  ← las 6 acciones de monitoreo
+│       └── index.py                  ← las 7 acciones de monitoreo
 ├── validate_aws_access.py            ← validación pre-deploy
 ├── cleanup_deploy.py                 ← limpieza diaria
 ├── cleanup_bootstrap.py              ← limpieza total
@@ -257,7 +257,7 @@ El script solicita interactivamente:
 
 ### 4.2 Interpretar los resultados
 
-El script ejecuta 12 verificaciones. El resultado esperado es:
+El script ejecuta **14 verificaciones**. El resultado esperado es:
 
 ```
   Running checks...
@@ -269,14 +269,16 @@ El script ejecuta 12 verificaciones. El resultado esperado es:
   [PASS] CloudWatch — DescribeAlarms accesible
   [PASS] CloudWatch Logs — DescribeLogGroups accesible
   [PASS] Bedrock — InvokeModel disponible
-  [PASS] Bedrock — Modelo Haiku habilitado en Model Access
+  [PASS] Bedrock — Modelo Haiku 4.5 habilitado en Model Access
   [PASS] Bedrock Agents — API accesible
   [PASS] Agent Runtime — permisos de acción verificados
+  [PASS] SSM — DescribeInstanceInformation (agent runtime)
+  [PASS] SSM — GetInventory (agent runtime)
   [PASS] S3 — acceso a buckets
   [PASS] CloudFormation — acceso para CDK
 
   ════════════════════════════════════
-  Resultado: 12/12 PASS ✅
+  Resultado: 14/14 PASS ✅
   ════════════════════════════════════
 ```
 
@@ -289,8 +291,9 @@ El script ejecuta 12 verificaciones. El resultado esperado es:
 | `[FAIL] Bedrock — Modelo Haiku no habilitado` | No se habilitó el modelo | Ir a AWS Console → Bedrock → Model access |
 | `[FAIL] IAM — AccessDenied` | Usuario no tiene permisos | Agregar políticas necesarias en IAM |
 | `[FAIL] CloudFormation — AccessDenied` | Falta permiso CDK | Agregar `AWSCloudFormationFullAccess` al usuario |
+| `[FAIL] SSM — AccessDenied` | Faltan permisos SSM al usuario de deploy | Agregar `AmazonSSMReadOnlyAccess` temporalmente |
 
-**Continuar solo con 12/12 PASS.**
+**Continuar solo con 14/14 PASS.**
 
 ---
 
@@ -889,11 +892,11 @@ Luego: `npm run deploy`.
 
 **Síntoma:** el chat retorna algo como `"ModelNotReadyException"` o `"AccessDeniedException"` al preguntar.
 
-**Causa:** Claude 3.5 Haiku no está habilitado en Bedrock Model Access.
+**Causa:** Claude Haiku 4.5 no está habilitado en Bedrock Model Access.
 
 **Solución:**
 1. AWS Console → Amazon Bedrock → Model access (us-east-1)
-2. Verificar que **Claude 3.5 Haiku** tiene estado **Access granted**
+2. Verificar que **Claude Haiku 4.5** tiene estado **Access granted**
 3. Si no, habilitar y esperar 1-5 minutos
 
 ### 9.5 El deploy falla con `iam:GetRole AccessDenied`
@@ -978,13 +981,29 @@ const actionLambda = new lambda.Function(this, 'MonitorActionsLambda', {
 
 Luego: `npm run deploy`. Las trazas aparecerán en la próxima invocación.
 
-### 9.9 Verificar la suite de tests antes de reportar un bug
+### 9.9 `get_ssm_inventory` retorna 0 instancias gestionadas
+
+**Causa:** las instancias EC2 no están registradas en SSM (SSM Inventory es gratuito pero requiere configuración).
+
+**Requisitos para que funcione:**
+1. **SSM Agent** instalado y corriendo en la instancia EC2
+   - Amazon Linux 2/2023 y Windows Server 2016+: ya viene pre-instalado
+   - Para verificar: `systemctl status amazon-ssm-agent` (Linux) o Services → AmazonSSMAgent (Windows)
+2. **IAM Role de la EC2** debe incluir la política `AmazonSSMManagedInstanceCore`
+   - Ir a EC2 → [instancia] → Security → IAM role → Attach policies
+3. **Conectividad** con los endpoints SSM (`ssm.us-east-1.amazonaws.com`)
+   - Si la instancia está en subnet privada sin NAT, configurar VPC Endpoints para SSM
+
+**Verificar en AWS Console:**
+- Systems Manager → Fleet Manager → debe listar tus instancias con estado "Online"
+
+### 9.10 Verificar la suite de tests antes de reportar un bug
 
 Antes de reportar cualquier problema con la lógica del agente, ejecutar:
 
 ```bash
 python run_tests.py all
-# Debe mostrar: Ran 162 tests — OK
+# Debe mostrar: 281 tests OK
 ```
 
 Si algún test falla, hay un bug en el código que debe corregirse antes del deploy.
@@ -997,7 +1016,7 @@ Si algún test falla, hay un bug en el código que debe corregirse antes del dep
 
 ```bash
 # Al comenzar el día (si limpiaste ayer)
-python validate_aws_access.py    # confirmar 12/12 PASS
+python validate_aws_access.py    # confirmar 14/14 PASS
 npm run deploy                   # redeplegar
 
 # Al finalizar el día
@@ -1007,7 +1026,7 @@ python cleanup_deploy.py         # eliminar recursos y evitar gastos
 ### 10.2 Antes de cada deploy
 
 ```bash
-python run_tests.py all          # verificar 162/162 OK
+python run_tests.py all          # verificar 281/281 OK
 npm run build                    # verificar que TypeScript compila
 python validate_aws_access.py    # verificar permisos AWS
 npm run deploy
@@ -1025,18 +1044,18 @@ npm run deploy
 
 ### 10.4 Cambiar el modelo LLM
 
-Para upgrade a Claude 3.5 Sonnet (mejor análisis, mayor costo):
+Para upgrade a Claude Sonnet 4.5 (mejor análisis, mayor costo):
 
 ```typescript
 // En lib/monitor-agent-stack.ts, cambiar:
-foundationModel: 'us.anthropic.claude-3-5-haiku-20241022-v1:0',
+foundationModel: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
 // por:
-foundationModel: 'us.anthropic.claude-3-5-sonnet-20241022-v2:0',
+foundationModel: 'us.anthropic.claude-sonnet-4-5-20251001-v1:0',
 
 // Y en la política IAM del BedrockAgentRole:
-'arn:aws:bedrock:' + this.region + '::inference-profile/us.anthropic.claude-3-5-haiku-20241022-v1:0',
+'arn:aws:bedrock:us-east-1:369595298303:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0',
 // agregar:
-'arn:aws:bedrock:' + this.region + '::inference-profile/us.anthropic.claude-3-5-sonnet-20241022-v2:0',
+'arn:aws:bedrock:us-east-1:369595298303:inference-profile/us.anthropic.claude-sonnet-4-5-20251001-v1:0',
 ```
 
 1. Habilitar el nuevo modelo en Bedrock Model Access
@@ -1074,12 +1093,12 @@ PRE-REQUISITOS
   □ Node.js 18+ instalado (node --version)
   □ Python 3.9+ instalado (python --version)
   □ boto3 instalado (pip install boto3)
-  □ Claude 3.5 Haiku habilitado en AWS Bedrock Model Access (us-east-1)
+  □ Claude Haiku 4.5 habilitado en AWS Bedrock Model Access (us-east-1)
   □ Access Key activa con permisos suficientes (no usar AKIA...REDACTED)
 
 ENTORNO
   □ npm install (dependencias CDK)
-  □ python validate_aws_access.py → 12/12 PASS
+  □ python validate_aws_access.py → 14/14 PASS
 
 DEPLOY
   □ npx cdk bootstrap aws://369595298303/us-east-1 (solo primera vez)
@@ -1096,4 +1115,4 @@ LIMPIEZA (al final del día)
 
 ---
 
-*Guía generada el 2026-06-04 · AWS Monitor Agent · 3htp · `asilveira@3htp.com`*
+*Guía actualizada el 2026-06-11 · AWS Monitor Agent · 3htp · `asilveira@3htp.com`*

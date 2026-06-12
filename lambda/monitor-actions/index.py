@@ -545,13 +545,175 @@ def get_xray_traces(event):
     })
 
 
+SSM_INVENTORY_TYPES = {
+    "AWS:InstanceInformation",
+    "AWS:Application",
+    "AWS:AWSComponent",
+    "AWS:Network",
+    "AWS:WindowsUpdate",
+    "AWS:PatchSummary",
+    "AWS:PatchCompliance",
+    "AWS:ComplianceSummary",
+    "ALL",
+}
+
+# Human-readable labels for inventory types
+SSM_TYPE_LABELS = {
+    "AWS:InstanceInformation": "OS & instance info",
+    "AWS:Application":         "installed applications",
+    "AWS:AWSComponent":        "AWS components",
+    "AWS:Network":             "network configuration",
+    "AWS:WindowsUpdate":       "Windows updates",
+    "AWS:PatchSummary":        "patch summary",
+    "AWS:PatchCompliance":     "patch compliance",
+    "AWS:ComplianceSummary":   "compliance summary",
+    "ALL":                     "all inventory types",
+}
+
+
+def get_ssm_inventory(event):
+    """
+    Query AWS Systems Manager Inventory for managed EC2 instances.
+    Returns OS info, installed applications, AWS components, network config, etc.
+    Requires SSM Agent installed + AmazonSSMManagedInstanceCore role on each EC2 instance.
+    """
+    region, region_err = _resolve_region(event)
+    if region_err:
+        return region_err
+
+    instance_id = get_param(event, "instance_id") or ""
+    inventory_type = (get_param(event, "inventory_type") or "AWS:InstanceInformation").strip()
+
+    # Validate inventory_type
+    if inventory_type not in SSM_INVENTORY_TYPES:
+        return err(
+            "Invalid inventory_type '{}'. Valid values: {}".format(
+                inventory_type, ", ".join(sorted(SSM_INVENTORY_TYPES))
+            ),
+            code=400,
+        )
+
+    ssm = boto3.client("ssm", region_name=region)
+
+    try:
+        # ── 1. Get managed instances list ────────────────────────────────────
+        paginator = ssm.get_paginator("describe_instance_information")
+        filters = []
+        if instance_id:
+            filters.append({"Key": "InstanceIds", "Values": [instance_id]})
+
+        managed_instances = []
+        try:
+            for page in paginator.paginate(
+                Filters=filters if filters else [],
+                PaginationConfig={"MaxItems": 100},
+            ):
+                for inst in page.get("InstanceInformationList", []):
+                    managed_instances.append({
+                        "instance_id":        inst.get("InstanceId", ""),
+                        "computer_name":      inst.get("ComputerName", ""),
+                        "platform_type":      inst.get("PlatformType", ""),
+                        "platform_name":      inst.get("PlatformName", ""),
+                        "platform_version":   inst.get("PlatformVersion", ""),
+                        "agent_version":      inst.get("AgentVersion", ""),
+                        "ip_address":         inst.get("IPAddress", ""),
+                        "ping_status":        inst.get("PingStatus", ""),
+                        "last_ping":          inst.get("LastPingDateTime", "").isoformat() if hasattr(inst.get("LastPingDateTime", ""), "isoformat") else str(inst.get("LastPingDateTime", "")),
+                        "association_status": inst.get("AssociationStatus", ""),
+                        "resource_type":      inst.get("ResourceType", ""),
+                    })
+        except Exception as e:
+            return err(
+                "Could not list SSM managed instances in region '{}'. "
+                "Ensure SSM Agent is installed and instances have the AmazonSSMManagedInstanceCore IAM role. "
+                "Error: {}".format(region, str(e)),
+                code=500,
+            )
+
+        if not managed_instances:
+            msg = (
+                "No SSM-managed instances found in region '{}'.".format(region)
+                + (" Instance '{}' is not managed by SSM.".format(instance_id) if instance_id else "")
+                + " Ensure: (1) SSM Agent is running on the instance, "
+                  "(2) instance has AmazonSSMManagedInstanceCore IAM role, "
+                  "(3) instance can reach SSM endpoints."
+            )
+            return ok({
+                "region": region,
+                "managed_instance_count": 0,
+                "instances": [],
+                "inventory": [],
+                "inventory_type": inventory_type,
+                "message": msg,
+            })
+
+        # ── 2. Fetch inventory data ───────────────────────────────────────────
+        inventory_results = []
+
+        if inventory_type == "ALL":
+            types_to_query = [
+                "AWS:InstanceInformation",
+                "AWS:Application",
+                "AWS:AWSComponent",
+                "AWS:Network",
+            ]
+        else:
+            types_to_query = [inventory_type]
+
+        for inv_type in types_to_query:
+            filters_inv = [{"Key": "TypeName", "Values": [inv_type]}]
+            if instance_id:
+                filters_inv.append({"Key": "AWS:InstanceInformation.InstanceId", "Values": [instance_id]})
+
+            try:
+                inv_paginator = ssm.get_paginator("get_inventory")
+                for page in inv_paginator.paginate(
+                    Filters=filters_inv,
+                    ResultAttributes=[{"TypeName": inv_type}],
+                    PaginationConfig={"MaxItems": 200},
+                ):
+                    for entity in page.get("Entities", []):
+                        entity_id = entity.get("Id", "")
+                        data = entity.get("Data", {})
+                        type_data = data.get(inv_type, {})
+                        entries = type_data.get("Content", [])
+                        if entries:
+                            inventory_results.append({
+                                "instance_id":    entity_id,
+                                "inventory_type": inv_type,
+                                "type_label":     SSM_TYPE_LABELS.get(inv_type, inv_type),
+                                "count":          len(entries),
+                                "entries":        entries[:50],  # cap at 50 per type per instance
+                            })
+            except Exception:
+                # Non-fatal: some types may not be collected on all instances
+                pass
+
+        return ok({
+            "region":                  region,
+            "managed_instance_count":  len(managed_instances),
+            "inventory_type_queried":  inventory_type,
+            "instances":               managed_instances,
+            "inventory":               inventory_results,
+            "note": (
+                "SSM Inventory requires: (1) SSM Agent running on each EC2 instance, "
+                "(2) AmazonSSMManagedInstanceCore IAM role on the instance, "
+                "(3) Inventory collection configured in SSM console or via Quick Setup."
+            ),
+        })
+
+    except Exception as e:
+        return _handle_region_error(e, region)
+
+
 ACTIONS = {
-    "get_ec2_health": get_ec2_health,
-    "get_lambda_health": get_lambda_health,
+    "get_ec2_health":     get_ec2_health,
+    "get_lambda_health":  get_lambda_health,
     "get_cloudwatch_alarms": get_cloudwatch_alarms,
     "get_overall_health": get_overall_health,
-    "get_logs_analysis": get_logs_analysis,
-    "get_xray_traces": get_xray_traces,
+    "get_logs_analysis":  get_logs_analysis,
+    "get_xray_traces":    get_xray_traces,
+    "get_ssm_inventory":  get_ssm_inventory,
 }
 
 

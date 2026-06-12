@@ -41,6 +41,7 @@ def make_session(
     agents_error=None,
     ec2_error=None,
     cw_error=None,
+    ssm_error=None,
 ):
     """Build a fully mocked boto3.Session for one test scenario."""
     session = MagicMock()
@@ -119,12 +120,20 @@ def make_session(
     logs = MagicMock()
     logs.describe_log_groups.return_value = {"logGroups": []}
 
+    ssm_client = MagicMock()
+    if ssm_error:
+        ssm_client.describe_instance_information.side_effect = ssm_error
+        ssm_client.get_inventory.side_effect = ssm_error
+    else:
+        ssm_client.describe_instance_information.return_value = {"InstanceInformationList": []}
+        ssm_client.get_inventory.return_value = {"Entities": []}
+
     lookup = {
         "sts": sts, "iam": iam,
         "bedrock": bedrock, "bedrock-runtime": bedrock_rt, "bedrock-agent": bedrock_agent,
         "ec2": ec2_client, "cloudwatch": cw_client, "lambda": lc,
         "apigateway": apigw, "cloudfront": cf, "s3": s3,
-        "cloudformation": cfn, "logs": logs,
+        "cloudformation": cfn, "logs": logs, "ssm": ssm_client,
     }
     session.client.side_effect = lambda svc, **kw: lookup.get(svc, MagicMock())
     return session
@@ -302,8 +311,9 @@ class TestCheckBedrockModelAccess(unittest.TestCase):
         v.check_bedrock_model_access(session, report)
         self.assertGreater(len(report.critical_failures), 0)
 
-    def test_model_id_uses_haiku_35(self):
-        self.assertIn("claude-3-5-haiku", v.BEDROCK_MODEL)
+    def test_model_id_uses_haiku_45(self):
+        # Model updated to Claude Haiku 4.5 (claude-3-5-haiku was Legacy)
+        self.assertIn("haiku", v.BEDROCK_MODEL)
         self.assertIn("anthropic", v.BEDROCK_MODEL)
 
     def test_region_is_us_east_1(self):
@@ -373,6 +383,40 @@ class TestCheckAgentRuntimePermissions(unittest.TestCase):
         cw_check = next((c for c in report.checks if "CloudWatch" in c.name and not c.passed), None)
         if cw_check:
             self.assertTrue(cw_check.critical)
+
+    def test_ssm_probes_present_when_all_pass(self):
+        session = make_session()
+        report = v.Report()
+        v.check_agent_runtime_permissions(session, report)
+        ssm_checks = [c for c in report.checks if "SSM" in c.name]
+        self.assertEqual(len(ssm_checks), 2)
+        for c in ssm_checks:
+            self.assertTrue(c.passed)
+
+    def test_ssm_denied_is_critical(self):
+        session = make_session(ssm_error=client_error("AccessDenied"))
+        report = v.Report()
+        v.check_agent_runtime_permissions(session, report)
+        ssm_checks = [c for c in report.checks if "SSM" in c.name and not c.passed]
+        self.assertGreater(len(ssm_checks), 0)
+        for c in ssm_checks:
+            self.assertTrue(c.critical)
+
+    def test_ssm_denied_mentions_action_lambda_role(self):
+        session = make_session(ssm_error=client_error("AccessDenied"))
+        report = v.Report()
+        v.check_agent_runtime_permissions(session, report)
+        ssm_check = next((c for c in report.checks if "SSM" in c.name and not c.passed), None)
+        self.assertIsNotNone(ssm_check)
+        self.assertIn("ActionLambdaRole", ssm_check.warning)
+
+    def test_runtime_probes_cover_all_services(self):
+        session = make_session()
+        report = v.Report()
+        v.check_agent_runtime_permissions(session, report)
+        names = " ".join(c.name for c in report.checks)
+        for svc in ("EC2", "CloudWatch", "Lambda", "Logs", "X-Ray", "SSM"):
+            self.assertIn(svc, names, f"{svc} probe missing from runtime checks")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

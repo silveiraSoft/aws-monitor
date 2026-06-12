@@ -370,6 +370,16 @@ def check_agent_runtime_permissions(session: boto3.Session, report: Report):
             ),
             "xray:GetTraceSummaries needed by get_xray_traces action",
         ),
+        (
+            "SSM — DescribeInstanceInformation (agent runtime)",
+            lambda: session.client("ssm", region_name=REGION).describe_instance_information(MaxResults=5),
+            "ssm:DescribeInstanceInformation needed by get_ssm_inventory action",
+        ),
+        (
+            "SSM — GetInventory (agent runtime)",
+            lambda: session.client("ssm", region_name=REGION).get_inventory(MaxResults=1),
+            "ssm:GetInventory needed by get_ssm_inventory action",
+        ),
     ]
 
     for name, probe, hint in runtime_probes:

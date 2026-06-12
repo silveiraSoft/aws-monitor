@@ -295,6 +295,56 @@
           }
         }
       }
+    },
+    "/get_ssm_inventory": {
+      "post": {
+        "operationId": "get_ssm_inventory",
+        "summary": "Get SSM Inventory for EC2 instances",
+        "description": "Returns SSM Inventory data for EC2 instances managed by SSM Agent: OS details, installed applications and versions, AWS components, network configuration. Requires SSM Agent running and AmazonSSMManagedInstanceCore IAM role attached to the instance.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "instance_id": {
+                    "type": "string",
+                    "description": "Optional EC2 instance ID (e.g. i-0abc123). If omitted, returns inventory for all managed instances."
+                  },
+                  "inventory_type": {
+                    "type": "string",
+                    "description": "Type of inventory: OS, Application, Network, AWSComponent, or All. Default: All"
+                  },
+                  "region": {
+                    "type": "string",
+                    "description": "AWS region to query (e.g. us-east-1). Default: us-east-1"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "SSM Inventory data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "managed_instance_count": { "type": "integer" },
+                    "instances": { "type": "array", "items": { "type": "object" } },
+                    "inventory": { "type": "array", "items": { "type": "object" } },
+                    "note": { "type": "string" },
+                    "region": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }
 }

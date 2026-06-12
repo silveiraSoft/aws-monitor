@@ -13,14 +13,17 @@ import * as fs from 'node:fs';
 
 interface ChatFrontendProps extends cdk.StackProps {
   agentId: string;
-  agentAliasId: string;
+  // agentAliasId is NOT passed as a prop. It is imported by name from the AgentStack
+  // export 'AwsMonitorAgentAliasId'. This avoids a CDK auto-generated cross-stack
+  // export whose name changes whenever the alias resource logical ID changes, which
+  // would cause CloudFormation to refuse the deploy (export in use by this stack).
 }
 
 export class ChatFrontendStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: ChatFrontendProps) {
     super(scope, id, props);
 
-    const { agentId, agentAliasId } = props;
+    const { agentId } = props;
 
     // ── 1. Lambda: Chat proxy to Bedrock Agent ────────────────────────────
     const chatLambdaRole = new iam.Role(this, 'ChatLambdaRole', {
@@ -33,10 +36,16 @@ export class ChatFrontendStack extends cdk.Stack {
           statements: [
             new iam.PolicyStatement({
               actions: ['bedrock:InvokeAgent'],
+              // Alias ID is read at runtime from SSM — use wildcard here
               resources: [
                 `arn:aws:bedrock:${this.region}:${this.account}:agent/${agentId}`,
-                `arn:aws:bedrock:${this.region}:${this.account}:agent-alias/${agentId}/${agentAliasId}`,
+                `arn:aws:bedrock:${this.region}:${this.account}:agent-alias/${agentId}/*`,
               ],
+            }),
+            new iam.PolicyStatement({
+              actions: ['ssm:GetParameter'],
+              // Allow reading the alias ID stored by AliasManagerFn after each deploy
+              resources: [`arn:aws:ssm:${this.region}:${this.account}:parameter/3htp/monitor/agent-alias-id`],
             }),
           ],
         }),
@@ -54,15 +63,17 @@ export class ChatFrontendStack extends cdk.Stack {
       functionName: 'aws-monitor-chat-proxy',
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'index.handler',
-      code: lambda.Code.fromInline(this.chatProxyCode(agentId, agentAliasId)),
+      code: lambda.Code.fromInline(this.chatProxyCode(agentId)),
       role: chatLambdaRole,
       timeout: cdk.Duration.seconds(29),
       memorySize: 256,
       description: 'Proxy between chat UI and Bedrock Agent',
       environment: {
         AGENT_ID: agentId,
-        AGENT_ALIAS_ID: agentAliasId,
         REGION: this.region,
+        // Forces Lambda cold start on every deploy so it reads the new alias
+        // from SSM immediately — no 5-minute cache wait after npm run deploy.
+        DEPLOY_TIME: Date.now().toString(),
       },
       logGroup: chatLogGroup,
     });
@@ -205,7 +216,7 @@ export class ChatFrontendStack extends cdk.Stack {
     });
   }
 
-  private chatProxyCode(agentId: string, agentAliasId: string): string {
+  private chatProxyCode(agentId: string): string {
     return `
 import json
 import boto3
@@ -217,10 +228,32 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 AGENT_ID = os.environ.get('AGENT_ID', '${agentId}')
-AGENT_ALIAS_ID = os.environ.get('AGENT_ALIAS_ID', '${agentAliasId}')
 REGION = os.environ.get('REGION', 'us-east-1')
 
 bedrock_agent = boto3.client('bedrock-agent-runtime', region_name=REGION)
+_ssm = boto3.client('ssm', region_name=REGION)
+
+# Cache alias ID per execution environment with 5-min TTL.
+# AliasManagerFn writes /3htp/monitor/agent-alias-id to SSM after each deploy.
+_alias_id_cache = None
+_alias_id_ts = 0.0
+
+def get_alias_id():
+    import time
+    global _alias_id_cache, _alias_id_ts
+    now = time.time()
+    if _alias_id_cache and (now - _alias_id_ts) < 300:
+        return _alias_id_cache
+    try:
+        resp = _ssm.get_parameter(Name='/3htp/monitor/agent-alias-id')
+        _alias_id_cache = resp['Parameter']['Value']
+        _alias_id_ts = now
+        logger.info("Loaded alias ID from SSM: %s", _alias_id_cache)
+    except Exception as e:
+        logger.warning("SSM get_alias_id failed: %s", e)
+        if not _alias_id_cache:
+            _alias_id_cache = os.environ.get('AGENT_ALIAS_ID', '')
+    return _alias_id_cache
 
 CORS_HEADERS = {
     'Access-Control-Allow-Origin': '*',
@@ -253,7 +286,7 @@ def handler(event, context):
 
         resp = bedrock_agent.invoke_agent(
             agentId=AGENT_ID,
-            agentAliasId=AGENT_ALIAS_ID,
+            agentAliasId=get_alias_id(),
             sessionId=session_id,
             inputText=message,
         )
