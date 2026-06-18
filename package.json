@@ -7,8 +7,12 @@
     "build": "tsc",
     "watch": "tsc -w",
     "cdk": "cdk",
-    "deploy": "cdk deploy --all --require-approval never",
-    "destroy": "cdk destroy --all"
+    "deploy":      "npm run deploy:dev",
+    "deploy:dev":  "cdk deploy --all --require-approval never --profile 3htpusa-monitor --context env=dev",
+    "deploy:prod": "cdk deploy --all --require-approval never --profile aws-monitor-prod --context env=prod",
+    "destroy":      "npm run destroy:dev",
+    "destroy:dev":  "cdk destroy --all --profile 3htpusa-monitor --context env=dev",
+    "destroy:prod": "cdk destroy --all --profile aws-monitor-prod --context env=prod"
   },
   "devDependencies": {
     "@types/aws-lambda": "^8.10.140",

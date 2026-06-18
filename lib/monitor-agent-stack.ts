@@ -9,6 +9,7 @@ import { Construct } from 'constructs';
 import path from 'node:path';
 import * as fs from 'node:fs';
 import * as crypto from 'node:crypto';
+import * as ssm from 'aws-cdk-lib/aws-ssm';
 
 export class MonitorAgentStack extends cdk.Stack {
   public readonly agentId: string;
@@ -34,6 +35,7 @@ export class MonitorAgentStack extends cdk.Stack {
                 'lambda:GetFunctionConfiguration',
                 'cloudwatch:DescribeAlarms',
                 'cloudwatch:GetMetricStatistics',
+                'cloudwatch:GetMetricData',
                 'cloudwatch:ListMetrics',
                 'logs:DescribeLogGroups',
                 'logs:DescribeLogStreams',
@@ -47,6 +49,12 @@ export class MonitorAgentStack extends cdk.Stack {
                 'ssm:DescribeInstanceInformation',
                 'ssm:ListInventoryEntries',
                 'ssm:GetInventory',
+                // ALB monitoring
+                'elasticloadbalancing:DescribeLoadBalancers',
+                'elasticloadbalancing:DescribeTargetGroups',
+                'elasticloadbalancing:DescribeTargetHealth',
+                // CloudTrail auditing
+                'cloudtrail:LookupEvents',
               ],
               resources: ['*'],
             }),
@@ -149,6 +157,10 @@ export class MonitorAgentStack extends cdk.Stack {
       '- CloudWatch Logs: search and analyze log events using Logs Insights queries',
       '- X-Ray traces: distributed request traces to identify slow or failing services',
       '- SSM Inventory: operating system details, installed applications and versions, AWS components, network configuration for EC2 instances managed by SSM Agent',
+      '- EC2 Process Metrics: top processes by CPU or memory usage via CloudWatch Agent procstat plugin (requires CloudWatch Agent on instances)',
+      '- EC2 Instance Metrics: CPU%, network and disk I/O per instance from CloudWatch basic monitoring (no agent required)',
+      '- ALB Health: Application Load Balancer request traffic, error rates, latency and target health',
+      '- CloudTrail Activity: recent AWS API calls, configuration changes and potential unauthorized actions',
       '',
       '## Multi-region behavior',
       '- All tools accept an optional "region" parameter (e.g. us-east-1, eu-west-1, ap-northeast-1).',
@@ -165,6 +177,10 @@ export class MonitorAgentStack extends cdk.Stack {
       '- get_logs_analysis: Query CloudWatch Logs Insights on a specific log group to find errors and patterns',
       '- get_xray_traces: X-Ray distributed trace summaries to find bottlenecks and failures',
       '- get_ssm_inventory: SSM Inventory data — OS info, installed apps/versions, AWS components, network config. Requires SSM Agent on instances.',
+      '- get_ec2_process_metrics: Top N processes by CPU or memory usage per EC2 instance, using CloudWatch Agent procstat metrics. Use this for questions about high-CPU or high-memory processes.',
+      '- get_ec2_instance_metrics: CPU%, NetworkIn/Out, DiskReadOps/WriteOps per EC2 instance from basic CloudWatch monitoring. No CloudWatch Agent required. Use for general instance performance questions.',
+      '- get_alb_health: Application Load Balancer metrics — request count, 4xx/5xx error rates, latency, healthy/unhealthy target counts. Use for load balancer and traffic questions.',
+      '- get_cloudtrail_activity: Recent AWS API activity from CloudTrail. Use for auditing who changed what, detecting unauthorized actions, or tracing configuration changes.',
       '',
       '## Response guidelines',
       '- Always include the region name in your response so the user knows which region was queried',
@@ -322,5 +338,228 @@ export class MonitorAgentStack extends cdk.Stack {
       description: 'Action Group Lambda for aws-monitor-agent',
       exportName: 'AwsMonitorActionLambdaArn',
     });
+    // ── CW Agent Auto-Provisioning ────────────────────────────────────────────
+    //
+    // PURPOSE: Install CloudWatch Agent on EC2 instances so the agent can answer
+    //   questions about per-process CPU/memory (get_ec2_process_metrics).
+    //
+    // SAFETY CONTRACT — this block NEVER:
+    //   - Modifies or reads existing IAM roles/policies on instances
+    //   - Replaces, detaches, or removes existing instance profiles
+    //   - Uses iam:AttachRolePolicy / iam:DetachRolePolicy on foreign roles
+    //   - Uses wildcard iam:PassRole (scoped to our role ARN only)
+    //
+    // WHAT IT DOES:
+    //   1. Creates a new IAM role (aws-monitor-cwagent-role) with 2 AWS-managed policies
+    //   2. Attaches it ONLY to instances that have NO IAM profile
+    //   3. Instances that already have a profile → reported in Lambda logs (never touched)
+    //   4. SSM Associations install + configure CW Agent on all SSM-managed instances
+
+    // IAM Role for instances without any profile.
+    // Only AWS managed policies — no inline policies, no custom permissions.
+    const cwAgentRole = new iam.Role(this, 'CwAgentRole', {
+      roleName: 'aws-monitor-cwagent-role',
+      assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com'),
+      managedPolicies: [
+        // Required: SSM can connect to the instance (run commands, state manager)
+        iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonSSMManagedInstanceCore'),
+        // Required: CloudWatch Agent can publish metrics to CloudWatch
+        // Also grants ssm:GetParameter on 'AmazonCloudWatch-*' params (for agent config)
+        iam.ManagedPolicy.fromAwsManagedPolicyName('CloudWatchAgentServerPolicy'),
+      ],
+      description: 'Minimal role for EC2 instances without IAM profile - aws-monitor managed',
+    });
+
+    const cwAgentProfile = new iam.CfnInstanceProfile(this, 'CwAgentInstanceProfile', {
+      instanceProfileName: 'aws-monitor-cwagent-profile',
+      roles: [cwAgentRole.roleName],
+    });
+    cwAgentProfile.node.addDependency(cwAgentRole);
+
+    // Lambda role for ProfileAttacherFn — minimal permissions only.
+    // Read: ec2:DescribeInstances + ec2:DescribeIamInstanceProfileAssociations
+    // Write: ec2:AssociateIamInstanceProfile (only on instances with no profile)
+    // PassRole: scoped to our cwAgentRole ARN — NEVER a wildcard
+    const profileAttacherRole = new iam.Role(this, 'ProfileAttacherRole', {
+      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+      managedPolicies: [
+        iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
+      ],
+      inlinePolicies: {
+        ProfileAttacherPolicy: new iam.PolicyDocument({
+          statements: [
+            new iam.PolicyStatement({
+              sid: 'ReadInstances',
+              actions: [
+                'ec2:DescribeInstances',
+                'ec2:DescribeIamInstanceProfileAssociations',
+              ],
+              resources: ['*'],
+            }),
+            new iam.PolicyStatement({
+              sid: 'AttachOnlyOurProfile',
+              // ec2:AssociateIamInstanceProfile does not support resource-level restrictions
+              // Safety is enforced by iam:PassRole being scoped to our role only (below)
+              actions: ['ec2:AssociateIamInstanceProfile'],
+              resources: ['*'],
+            }),
+            new iam.PolicyStatement({
+              sid: 'PassOurRoleOnly',
+              // Scoped to exact ARN of our role — prevents attaching any other role
+              actions: ['iam:PassRole'],
+              resources: [cwAgentRole.roleArn],
+            }),
+          ],
+        }),
+      },
+    });
+
+    const profileAttacherFn = new lambda.Function(this, 'ProfileAttacherFn', {
+      functionName: 'aws-monitor-profile-attacher',
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'index.handler',
+      timeout: cdk.Duration.minutes(5),
+      role: profileAttacherRole,
+      code: lambda.Code.fromAsset('lambda/profile-attacher'),
+      description: 'Attaches aws-monitor-cwagent-profile to EC2 instances that have no IAM profile',
+    });
+
+    const profileAttacherProvider = new cr.Provider(this, 'ProfileAttacherProvider', {
+      onEventHandler: profileAttacherFn,
+    });
+
+    // Runs on every deploy (DeployTime changes) → picks up new instances automatically
+    const profileAttacherResource = new cdk.CustomResource(this, 'ProfileAttacherResource', {
+      serviceToken: profileAttacherProvider.serviceToken,
+      properties: {
+        Region: this.region,
+        ProfileArn: cwAgentProfile.attrArn,
+        ProfileName: 'aws-monitor-cwagent-profile',
+        DeployTime: Date.now().toString(),
+      },
+    });
+    profileAttacherResource.node.addDependency(cwAgentProfile);
+
+    // SSM Parameter — CloudWatch Agent config with procstat + mem + disk metrics.
+    // Name MUST start with 'AmazonCloudWatch-' so CloudWatchAgentServerPolicy
+    // (attached to instances) allows ssm:GetParameter on it.
+    const cwAgentConfigParam = new ssm.StringParameter(this, 'CwAgentConfigParam', {
+      parameterName: '/AmazonCloudWatch-aws-monitor/config',
+      description: 'CW Agent config: procstat CPU/memory per process + instance mem + disk',
+      // Cross-platform config: works on Linux and Windows.
+      // exe:".*" selects all processes (required on Windows; also valid on Linux).
+      // resources:"*" captures all mounts (Linux) and all drives (Windows).
+      stringValue: JSON.stringify({
+        metrics: {
+          namespace: 'CWAgent',
+          append_dimensions: { InstanceId: '${aws:InstanceId}' },
+          metrics_collected: {
+            mem: {
+              measurement: ['mem_used_percent', 'mem_available_percent'],
+              metrics_collection_interval: 60,
+            },
+            disk: {
+              measurement: ['disk_used_percent'],
+              resources: ['*'],
+              metrics_collection_interval: 60,
+            },
+            procstat: [
+              {
+                // pattern matches full command line via regex — works on both Linux and Windows.
+                // exe:".*" is treated as literal string on Windows (no match); pattern:".*" is always regex.
+                pattern: '.*',
+                pid_finder: 'native',
+                measurement: ['cpu_usage', 'memory_rss'],
+                metrics_collection_interval: 60,
+              },
+            ],
+          },
+        },
+      }),
+    });
+
+    // Single SSM Document that runs install then configure in sequence.
+    // Eliminates race condition: both steps run in the same SSM execution, in order.
+    // Build the SSM document content as JSON string to avoid TS type issues with computed values.
+    const cwAgentSetupDocContent = JSON.stringify({
+      schemaVersion: '2.2',
+      description: 'Install and configure CloudWatch Agent (aws-monitor). Runs install first, then configure.',
+      mainSteps: [
+        {
+          action: 'aws:runDocument',
+          name: 'installCWAgent',
+          inputs: {
+            documentType: 'SSMDocument',
+            documentPath: 'AWS-ConfigureAWSPackage',
+            documentParameters: '{"action":"Install","name":"AmazonCloudWatchAgent"}',
+          },
+        },
+        {
+          action: 'aws:runDocument',
+          name: 'configureCWAgent',
+          inputs: {
+            documentType: 'SSMDocument',
+            documentPath: 'AmazonCloudWatch-ManageAgent',
+            documentParameters: `{"action":"configure","mode":"ec2","optionalConfigurationSource":"ssm","optionalConfigurationLocation":"${cwAgentConfigParam.parameterName}","optionalRestart":"yes"}`,
+          },
+        },
+      ],
+    });
+
+    const cwAgentSetupDoc = new ssm.CfnDocument(this, 'CwAgentSetupDoc', {
+      name: 'monitor-cwagent-setup',
+      documentType: 'Command',
+      content: cwAgentSetupDocContent,
+    });
+    cwAgentSetupDoc.node.addDependency(cwAgentConfigParam);
+
+    // Single association runs both steps sequentially; no race condition possible.
+    const cwAgentSetupAssoc = new ssm.CfnAssociation(this, 'CwAgentSetupAssoc', {
+      name: cwAgentSetupDoc.ref,
+      associationName: 'monitor-cwagent-setup',
+      targets: [{ key: 'InstanceIds', values: ['*'] }],
+      scheduleExpression: 'rate(7 days)',
+      complianceSeverity: 'LOW',
+    });
+    cwAgentSetupAssoc.node.addDependency(cwAgentSetupDoc);
+
+    // Custom Resource: triggers StartAssociationsOnce after every deploy where the
+    // CW Agent config changes. Physical ID = config hash → CloudFormation detects
+    // change → calls onCreate → association runs automatically on all instances.
+    const cwAgentConfigHash = crypto.createHash('md5')
+      .update(cwAgentConfigParam.stringValue)
+      .digest('hex')
+      .substring(0, 8);
+
+    const triggerCwAgentSetup = new cr.AwsCustomResource(this, 'TriggerCwAgentSetup', {
+      onCreate: {
+        service: 'SSM',
+        action: 'startAssociationsOnce',
+        parameters: { AssociationIds: [cwAgentSetupAssoc.ref] },
+        physicalResourceId: cr.PhysicalResourceId.of(`cwagent-trigger-${cwAgentConfigHash}`),
+      },
+      onUpdate: {
+        service: 'SSM',
+        action: 'startAssociationsOnce',
+        parameters: { AssociationIds: [cwAgentSetupAssoc.ref] },
+        physicalResourceId: cr.PhysicalResourceId.of(`cwagent-trigger-${cwAgentConfigHash}`),
+      },
+      policy: cr.AwsCustomResourcePolicy.fromSdkCalls({
+        resources: cr.AwsCustomResourcePolicy.ANY_RESOURCE,
+      }),
+    });
+    triggerCwAgentSetup.node.addDependency(cwAgentSetupAssoc);
+    triggerCwAgentSetup.node.addDependency(cwAgentConfigParam);
+
+    new cdk.CfnOutput(this, 'CwAgentSetupStatus', {
+      value: [
+        'ProfileAttacher ran — check /aws/lambda/aws-monitor-profile-attacher logs for details.',
+        'Instances WITHOUT profile: aws-monitor-cwagent-profile was attached automatically.',
+        'Instances WITH existing profile: add AmazonSSMManagedInstanceCore + CloudWatchAgentServerPolicy to their IAM role manually.',
+        'SSM Associations will install + configure CW Agent on all SSM-managed instances.',
+      ].join(' | '),
+      description: 'CW Agent auto-provisioning result. Check Lambda logs for per-instance details.',
+    });
+
   }
 }

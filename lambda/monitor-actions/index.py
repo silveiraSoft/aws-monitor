@@ -59,6 +59,8 @@ def _make_clients(region):
         "cloudwatch": boto3.client("cloudwatch", region_name=region),
         "logs": boto3.client("logs", region_name=region),
         "xray": boto3.client("xray", region_name=region),
+        "elbv2": boto3.client("elbv2", region_name=region),
+        "cloudtrail": boto3.client("cloudtrail", region_name=region),
     }
 
 
@@ -706,6 +708,406 @@ def get_ssm_inventory(event):
         return _handle_region_error(e, region)
 
 
+
+def get_ec2_process_metrics(event):
+    """
+    Returns top N processes by CPU or memory usage via CloudWatch Agent procstat metrics.
+    Requires CloudWatch Agent with procstat plugin on EC2 instances.
+    """
+    region, region_err = _resolve_region(event)
+    if region_err:
+        return region_err
+
+    metric_type = (get_param(event, "metric") or "cpu").lower()
+    instance_id = (get_param(event, "instance_id") or "").strip()[:64]
+
+    try:
+        top_n = min(int(get_param(event, "top_n") or 5), 20)
+    except (ValueError, TypeError):
+        top_n = 5
+
+    try:
+        hours = max(1, min(int(get_param(event, "hours") or 1), 24))
+    except (ValueError, TypeError):
+        hours = 1
+
+    if metric_type == "memory":
+        metric_name = "procstat memory_rss"
+        unit_label = "bytes"
+    else:
+        metric_type = "cpu"
+        metric_name = "procstat cpu_usage"
+        unit_label = "%"
+
+    try:
+        clients = _make_clients(region)
+        cw = clients["cloudwatch"]
+
+        # List available procstat metrics
+        list_kwargs = {"Namespace": "CWAgent", "MetricName": metric_name}
+        if instance_id:
+            list_kwargs["Dimensions"] = [{"Name": "InstanceId", "Value": instance_id}]
+
+        raw_metrics = []
+        paginator = cw.get_paginator("list_metrics")
+        for page in paginator.paginate(**list_kwargs):
+            raw_metrics.extend(page["Metrics"])
+
+        if not raw_metrics:
+            return ok({
+                "metric": metric_type,
+                "instance_id": instance_id or "all",
+                "hours": hours,
+                "processes": [],
+                "note": (
+                    "No procstat metrics found in CloudWatch (namespace CWAgent). "
+                    "To enable process monitoring: (1) Install CloudWatch Agent on each EC2 instance "
+                    "via SSM Run Command or manually, (2) Configure the procstat plugin to collect "
+                    "cpu_usage and memory_rss, (3) Start the agent. "
+                    "Metrics appear within 1-2 minutes of agent startup."
+                ),
+                "region": region,
+            })
+
+        # Build GetMetricData queries (max 500 per call)
+        end_time = datetime.now(timezone.utc)
+        start_time = end_time - timedelta(hours=hours)
+        period = max(60, (hours * 3600) // 60)
+
+        queries = []
+        for i, m in enumerate(raw_metrics[:500]):
+            queries.append({
+                "Id": "p{}".format(i),
+                "MetricStat": {
+                    "Metric": m,
+                    "Period": period,
+                    "Stat": "Average",
+                },
+                "ReturnData": True,
+            })
+
+        # Fetch metric data
+        data_by_id = {}
+        for batch_start in range(0, len(queries), 500):
+            batch = queries[batch_start:batch_start + 500]
+            resp = cw.get_metric_data(
+                MetricDataQueries=batch,
+                StartTime=start_time,
+                EndTime=end_time,
+            )
+            for r in resp.get("MetricDataResults", []):
+                if r["Values"]:
+                    data_by_id[r["Id"]] = {
+                        "avg": sum(r["Values"]) / len(r["Values"]),
+                        "max": max(r["Values"]),
+                    }
+
+        # Build and sort process list
+        processes = []
+        for i, m in enumerate(raw_metrics[:500]):
+            qid = "p{}".format(i)
+            if qid not in data_by_id:
+                continue
+            dims = {d["Name"]: d["Value"] for d in m["Dimensions"]}
+            val = data_by_id[qid]
+            entry = {
+                "process_name": dims.get("process_name", "unknown"),
+                "instance_id": dims.get("InstanceId", "unknown"),
+                "avg": round(val["avg"], 2),
+                "max": round(val["max"], 2),
+                "unit": unit_label,
+            }
+            if metric_type == "memory":
+                entry["avg_mb"] = round(val["avg"] / 1048576, 1)
+                entry["max_mb"] = round(val["max"] / 1048576, 1)
+            processes.append(entry)
+
+        processes.sort(key=lambda x: x["avg"], reverse=True)
+
+        return ok({
+            "metric": metric_type,
+            "instance_id": instance_id or "all",
+            "hours": hours,
+            "top_n": top_n,
+            "total_processes_found": len(processes),
+            "processes": processes[:top_n],
+            "region": region,
+        })
+
+    except Exception as e:
+        return _handle_region_error(e, region)
+
+
+
+def get_ec2_instance_metrics(event):
+    """
+    Returns CPU, network and disk metrics per EC2 instance from CloudWatch basic monitoring.
+    No CloudWatch Agent required — metrics available for all instances by default.
+    """
+    region, region_err = _resolve_region(event)
+    if region_err:
+        return region_err
+
+    instance_id = (get_param(event, "instance_id") or "").strip()[:64]
+    try:
+        hours = max(1, min(int(get_param(event, "hours") or 1), 24))
+    except (ValueError, TypeError):
+        hours = 1
+
+    try:
+        clients = _make_clients(region)
+        ec2 = clients["ec2"]
+        cw  = clients["cloudwatch"]
+
+        # Get running instances
+        instances = []
+        paginator = ec2.get_paginator("describe_instances")
+        filters = [{"Name": "instance-state-name", "Values": ["running"]}]
+        if instance_id:
+            filters.append({"Name": "instance-id", "Values": [instance_id]})
+        for page in paginator.paginate(Filters=filters):
+            for r in page["Reservations"]:
+                for i in r["Instances"]:
+                    name = next((t["Value"] for t in i.get("Tags", []) if t["Key"] == "Name"), "")
+                    instances.append({"id": i["InstanceId"], "name": name})
+
+        if not instances:
+            return ok({"instances": [], "region": region,
+                       "note": "No running instances found" + (f" matching {instance_id}" if instance_id else ".")})
+
+        end_time = datetime.now(timezone.utc)
+        start_time = end_time - timedelta(hours=hours)
+        period = max(60, (hours * 3600) // 60)
+
+        METRIC_NAMES = ["CPUUtilization", "NetworkIn", "NetworkOut", "DiskReadOps", "DiskWriteOps"]
+        queries = []
+        for inst in instances:
+            iid = inst["id"]
+            for mname in METRIC_NAMES:
+                qid = "{}_{}".format(iid.replace("-", "_"), mname)
+                queries.append({
+                    "Id": qid,
+                    "MetricStat": {
+                        "Metric": {
+                            "Namespace": "AWS/EC2",
+                            "MetricName": mname,
+                            "Dimensions": [{"Name": "InstanceId", "Value": iid}],
+                        },
+                        "Period": period,
+                        "Stat": "Average",
+                    },
+                    "ReturnData": True,
+                })
+
+        data = {}
+        for i in range(0, len(queries), 500):
+            resp = cw.get_metric_data(MetricDataQueries=queries[i:i+500],
+                                      StartTime=start_time, EndTime=end_time)
+            for r in resp.get("MetricDataResults", []):
+                if r["Values"]:
+                    data[r["Id"]] = round(sum(r["Values"]) / len(r["Values"]), 2)
+
+        result = []
+        for inst in instances:
+            iid = inst["id"]
+            pfx = iid.replace("-", "_")
+            result.append({
+                "instance_id": iid,
+                "name": inst["name"],
+                "cpu_pct": data.get("{}_CPUUtilization".format(pfx)),
+                "network_in_bytes": data.get("{}_NetworkIn".format(pfx)),
+                "network_out_bytes": data.get("{}_NetworkOut".format(pfx)),
+                "disk_read_ops": data.get("{}_DiskReadOps".format(pfx)),
+                "disk_write_ops": data.get("{}_DiskWriteOps".format(pfx)),
+                "hours": hours,
+            })
+
+        result.sort(key=lambda x: (x["cpu_pct"] or 0), reverse=True)
+        return ok({"instances": result, "count": len(result), "region": region})
+
+    except Exception as e:
+        return _handle_region_error(e, region)
+
+
+def get_alb_health(event):
+    """
+    Returns health and traffic metrics for Application Load Balancers (ALB).
+    Includes request count, error rates (4xx/5xx), latency and host health.
+    """
+    region, region_err = _resolve_region(event)
+    if region_err:
+        return region_err
+
+    alb_name = (get_param(event, "alb_name") or "").strip()[:128]
+    try:
+        hours = max(1, min(int(get_param(event, "hours") or 1), 24))
+    except (ValueError, TypeError):
+        hours = 1
+
+    try:
+        clients = _make_clients(region)
+        elb = clients["elbv2"]
+        cw  = clients["cloudwatch"]
+
+        kwargs = {"LoadBalancerArns": []} if not alb_name else {}
+        resp = elb.describe_load_balancers(**({"Names": [alb_name]} if alb_name else {}))
+        lbs = resp.get("LoadBalancers", [])
+
+        if not lbs:
+            return ok({"load_balancers": [], "region": region,
+                       "note": "No Application Load Balancers found" + (f" named '{alb_name}'" if alb_name else ".")})
+
+        end_time = datetime.now(timezone.utc)
+        start_time = end_time - timedelta(hours=hours)
+        period = max(60, (hours * 3600) // 60)
+
+        ALB_METRICS = ["RequestCount", "HTTPCode_ELB_4XX_Count",
+                       "HTTPCode_ELB_5XX_Count", "TargetResponseTime",
+                       "HealthyHostCount", "UnHealthyHostCount"]
+
+        queries = []
+        lb_keys = {}
+        for lb in lbs:
+            # ALB dimension uses the suffix after "app/"
+            arn_suffix = "/".join(lb["LoadBalancerArn"].split(":")[-1].split("/")[1:])
+            lb_keys[lb["LoadBalancerArn"]] = arn_suffix
+            for mname in ALB_METRICS:
+                stat = "Sum" if mname in ("RequestCount", "HTTPCode_ELB_4XX_Count",
+                                           "HTTPCode_ELB_5XX_Count") else "Average"
+                safe = lb["LoadBalancerName"].replace("-", "_")
+                qid = "{}_{}".format(safe, mname)
+                queries.append({
+                    "Id": qid,
+                    "MetricStat": {
+                        "Metric": {
+                            "Namespace": "AWS/ApplicationELB",
+                            "MetricName": mname,
+                            "Dimensions": [{"Name": "LoadBalancer", "Value": arn_suffix}],
+                        },
+                        "Period": period,
+                        "Stat": stat,
+                    },
+                    "ReturnData": True,
+                })
+
+        data = {}
+        for i in range(0, len(queries), 500):
+            r = cw.get_metric_data(MetricDataQueries=queries[i:i+500],
+                                   StartTime=start_time, EndTime=end_time)
+            for result in r.get("MetricDataResults", []):
+                if result["Values"]:
+                    data[result["Id"]] = round(sum(result["Values"]), 2)                         if any(m in result["Id"] for m in ["RequestCount", "4XX", "5XX"])                         else round(sum(result["Values"]) / len(result["Values"]), 4)
+
+        lb_results = []
+        for lb in lbs:
+            safe = lb["LoadBalancerName"].replace("-", "_")
+            req = data.get("{}_RequestCount".format(safe), 0) or 0
+            err4 = data.get("{}_HTTPCode_ELB_4XX_Count".format(safe), 0) or 0
+            err5 = data.get("{}_HTTPCode_ELB_5XX_Count".format(safe), 0) or 0
+            error_rate = round((err4 + err5) / req * 100, 2) if req > 0 else 0
+            lb_results.append({
+                "name": lb["LoadBalancerName"],
+                "state": lb["State"]["Code"],
+                "dns": lb["DNSName"],
+                "requests": int(req),
+                "errors_4xx": int(err4),
+                "errors_5xx": int(err5),
+                "error_rate_pct": error_rate,
+                "avg_latency_ms": round((data.get("{}_TargetResponseTime".format(safe)) or 0) * 1000, 1),
+                "healthy_hosts": int(data.get("{}_HealthyHostCount".format(safe)) or 0),
+                "unhealthy_hosts": int(data.get("{}_UnHealthyHostCount".format(safe)) or 0),
+                "health": "CRITICAL" if (data.get("{}_UnHealthyHostCount".format(safe)) or 0) > 0
+                          else "WARNING" if error_rate > 5 else "OK",
+                "hours": hours,
+            })
+
+        return ok({"load_balancers": lb_results, "count": len(lb_results), "region": region})
+
+    except Exception as e:
+        return _handle_region_error(e, region)
+
+
+def get_cloudtrail_activity(event):
+    """
+    Returns recent AWS API activity from CloudTrail.
+    Useful for auditing who changed what and detecting unauthorized actions.
+    """
+    region, region_err = _resolve_region(event)
+    if region_err:
+        return region_err
+
+    try:
+        hours = max(1, min(int(get_param(event, "hours") or 3), 24))
+    except (ValueError, TypeError):
+        hours = 3
+
+    username   = (get_param(event, "username") or "").strip()[:128]
+    event_name = (get_param(event, "event_name") or "").strip()[:128]
+    try:
+        limit = min(int(get_param(event, "limit") or 20), 50)
+    except (ValueError, TypeError):
+        limit = 20
+
+    try:
+        clients = _make_clients(region)
+        ct = clients["cloudtrail"]
+
+        end_time = datetime.now(timezone.utc)
+        start_time = end_time - timedelta(hours=hours)
+
+        lookup_attrs = []
+        if username:
+            lookup_attrs.append({"AttributeKey": "Username", "AttributeValue": username})
+        elif event_name:
+            lookup_attrs.append({"AttributeKey": "EventName", "AttributeValue": event_name})
+
+        kwargs = {
+            "StartTime": start_time,
+            "EndTime": end_time,
+            "MaxResults": limit,
+        }
+        if lookup_attrs:
+            kwargs["LookupAttributes"] = lookup_attrs
+
+        resp = ct.lookup_events(**kwargs)
+        raw_events = resp.get("Events", [])
+
+        events = []
+        for e in raw_events:
+            detail = {}
+            try:
+                detail = json.loads(e.get("CloudTrailEvent", "{}"))
+            except Exception:
+                pass
+            events.append({
+                "time": e["EventTime"].isoformat() if hasattr(e.get("EventTime"), "isoformat") else str(e.get("EventTime")),
+                "action": e.get("EventName"),
+                "user": e.get("Username", detail.get("userIdentity", {}).get("arn", "unknown")),
+                "source_ip": detail.get("sourceIPAddress"),
+                "resource": e.get("Resources", [{}])[0].get("ResourceName") if e.get("Resources") else None,
+                "error": detail.get("errorCode"),
+                "region": detail.get("awsRegion", region),
+            })
+
+        summary = {
+            "total_events": len(events),
+            "errors": sum(1 for ev in events if ev.get("error")),
+            "unique_users": len({ev["user"] for ev in events}),
+            "unique_actions": len({ev["action"] for ev in events}),
+        }
+
+        return ok({
+            "hours": hours,
+            "filter_user": username or None,
+            "filter_action": event_name or None,
+            "summary": summary,
+            "events": events,
+            "region": region,
+        })
+
+    except Exception as e:
+        return _handle_region_error(e, region)
+
 ACTIONS = {
     "get_ec2_health":     get_ec2_health,
     "get_lambda_health":  get_lambda_health,
@@ -714,6 +1116,10 @@ ACTIONS = {
     "get_logs_analysis":  get_logs_analysis,
     "get_xray_traces":    get_xray_traces,
     "get_ssm_inventory":  get_ssm_inventory,
+    "get_ec2_process_metrics": get_ec2_process_metrics,
+    "get_ec2_instance_metrics": get_ec2_instance_metrics,
+    "get_alb_health": get_alb_health,
+    "get_cloudtrail_activity": get_cloudtrail_activity,
 }
 
 

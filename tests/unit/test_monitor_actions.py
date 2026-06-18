@@ -45,13 +45,16 @@ def make_paginator(pages: list):
     p.paginate.return_value = pages
     return p
 
-def make_clients(ec2=None, lambda_c=None, cloudwatch=None, logs=None, xray=None):
+def make_clients(ec2=None, lambda_c=None, cloudwatch=None, logs=None, xray=None,
+                  elbv2=None, cloudtrail=None):
     """Build the dict that _make_clients returns, with sensible defaults."""
     ec2_m = ec2 or MagicMock()
     cw_m = cloudwatch or MagicMock()
     lc_m = lambda_c or MagicMock()
     logs_m = logs or MagicMock()
     xray_m = xray or MagicMock()
+    elbv2_m = elbv2 or MagicMock()
+    ct_m = cloudtrail or MagicMock()
     if ec2 is None:
         ec2_m.get_paginator.return_value = make_paginator([{"Reservations": []}])
     if cloudwatch is None:
@@ -64,7 +67,12 @@ def make_clients(ec2=None, lambda_c=None, cloudwatch=None, logs=None, xray=None)
         logs_m.get_query_results.return_value = {"status": "Complete", "results": [], "statistics": {}}
     if xray is None:
         xray_m.get_paginator.return_value = make_paginator([{"TraceSummaries": []}])
-    return {"ec2": ec2_m, "lambda": lc_m, "cloudwatch": cw_m, "logs": logs_m, "xray": xray_m}
+    if elbv2 is None:
+        elbv2_m.describe_load_balancers.return_value = {"LoadBalancers": []}
+    if cloudtrail is None:
+        ct_m.lookup_events.return_value = {"Events": []}
+    return {"ec2": ec2_m, "lambda": lc_m, "cloudwatch": cw_m, "logs": logs_m, "xray": xray_m,
+            "elbv2": elbv2_m, "cloudtrail": ct_m}
 
 def make_ec2_instance(instance_id, state="running", name=None, instance_type="t3.micro", az="us-east-1a"):
     now = datetime.now(timezone.utc)
@@ -941,10 +949,11 @@ class TestInputValidationSecurity(unittest.TestCase):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestConstants(unittest.TestCase):
-    def test_actions_dict_has_seven_entries(self):
+    def test_actions_dict_has_eleven_entries(self):
         expected = {"get_ec2_health", "get_lambda_health", "get_cloudwatch_alarms",
                     "get_overall_health", "get_logs_analysis", "get_xray_traces",
-                    "get_ssm_inventory"}
+                    "get_ssm_inventory", "get_ec2_process_metrics",
+                    "get_ec2_instance_metrics", "get_alb_health", "get_cloudtrail_activity"}
         self.assertEqual(set(index.ACTIONS.keys()), expected)
 
     def test_valid_ec2_states_contains_all(self):
@@ -1189,6 +1198,605 @@ class TestGetSsmInventory(unittest.TestCase):
         self.assertIn("AWS:Application", index.SSM_INVENTORY_TYPES)
         self.assertIn("ALL", index.SSM_INVENTORY_TYPES)
 
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# get_ec2_process_metrics
+# ─────────────────────────────────────────────────────────────────────────────
+
+def make_cw_metric(process_name, instance_id="i-0abc123456"):
+    """Build a CloudWatch procstat metric entry."""
+    return {
+        "Namespace": "CWAgent",
+        "MetricName": "procstat cpu_usage",
+        "Dimensions": [
+            {"Name": "InstanceId", "Value": instance_id},
+            {"Name": "process_name", "Value": process_name},
+            {"Name": "pid_finder", "Value": "native"},
+        ],
+    }
+
+def make_metric_data_result(query_id, values):
+    return {"Id": query_id, "Values": values, "Timestamps": [], "StatusCode": "Complete"}
+
+
+class TestGetEc2ProcessMetrics(unittest.TestCase):
+
+    def _call(self, params=None, region="us-east-1"):
+        p = [{"name": "region", "value": region}]
+        if params:
+            p.extend(params)
+        event = make_event("/get_ec2_process_metrics", p)
+        return index.get_ec2_process_metrics(event)
+
+    def _make_cw(self, metrics=None, metric_data_results=None):
+        """Return a CloudWatch mock with procstat data."""
+        cw = MagicMock()
+        cw.get_paginator.return_value = make_paginator([
+            {"Metrics": metrics or []}
+        ])
+        cw.get_metric_data.return_value = {
+            "MetricDataResults": metric_data_results or []
+        }
+        return cw
+
+    # ── No CloudWatch Agent installed (empty metrics) ─────────────────────
+
+    def test_no_procstat_metrics_returns_ok_with_note(self):
+        cw = self._make_cw(metrics=[])
+        clients = make_clients(cloudwatch=cw)
+        with patch("index._make_clients", return_value=clients):
+            resp = self._call()
+        self.assertEqual(resp["response"]["httpStatusCode"], 200)
+        body = parse_body(resp)
+        self.assertEqual(body["processes"], [])
+        self.assertIn("note", body)
+        self.assertIn("CloudWatch Agent", body["note"])
+        self.assertEqual(body["metric"], "cpu")
+        self.assertEqual(body["region"], "us-east-1")
+
+    def test_no_metrics_with_instance_filter_returns_ok(self):
+        cw = self._make_cw(metrics=[])
+        clients = make_clients(cloudwatch=cw)
+        with patch("index._make_clients", return_value=clients):
+            resp = self._call(params=[{"name": "instance_id", "value": "i-0abc"}])
+        body = parse_body(resp)
+        self.assertEqual(body["processes"], [])
+        self.assertEqual(body["instance_id"], "i-0abc")
+
+    # ── CPU metrics ───────────────────────────────────────────────────────
+
+    def test_cpu_returns_top_processes_sorted_desc(self):
+        metrics = [
+            make_cw_metric("nginx"),
+            make_cw_metric("java"),
+            make_cw_metric("python3"),
+        ]
+        results = [
+            make_metric_data_result("p0", [5.0, 3.0]),   # nginx avg=4.0
+            make_metric_data_result("p1", [80.0, 90.0]), # java avg=85.0
+            make_metric_data_result("p2", [10.0, 20.0]), # python3 avg=15.0
+        ]
+        cw = self._make_cw(metrics=metrics, metric_data_results=results)
+        clients = make_clients(cloudwatch=cw)
+        with patch("index._make_clients", return_value=clients):
+            resp = self._call()
+        body = parse_body(resp)
+        self.assertEqual(resp["response"]["httpStatusCode"], 200)
+        procs = body["processes"]
+        self.assertEqual(len(procs), 3)
+        # Sorted descending by avg
+        self.assertEqual(procs[0]["process_name"], "java")
+        self.assertAlmostEqual(procs[0]["avg"], 85.0)
+        self.assertEqual(procs[1]["process_name"], "python3")
+        self.assertEqual(procs[2]["process_name"], "nginx")
+
+    def test_cpu_unit_is_percent(self):
+        metrics = [make_cw_metric("nginx")]
+        results = [make_metric_data_result("p0", [10.0])]
+        cw = self._make_cw(metrics=metrics, metric_data_results=results)
+        clients = make_clients(cloudwatch=cw)
+        with patch("index._make_clients", return_value=clients):
+            resp = self._call()
+        body = parse_body(resp)
+        self.assertEqual(body["processes"][0]["unit"], "%")
+
+    def test_cpu_no_avg_mb_field(self):
+        metrics = [make_cw_metric("nginx")]
+        results = [make_metric_data_result("p0", [10.0])]
+        cw = self._make_cw(metrics=metrics, metric_data_results=results)
+        clients = make_clients(cloudwatch=cw)
+        with patch("index._make_clients", return_value=clients):
+            resp = self._call()
+        body = parse_body(resp)
+        self.assertNotIn("avg_mb", body["processes"][0])
+
+    # ── Memory metrics ────────────────────────────────────────────────────
+
+    def test_memory_metric_type(self):
+        metrics = [make_cw_metric("java")]
+        metrics[0]["MetricName"] = "procstat memory_rss"
+        results = [make_metric_data_result("p0", [104857600.0])]  # 100 MB
+        cw = self._make_cw(metrics=metrics, metric_data_results=results)
+        clients = make_clients(cloudwatch=cw)
+        with patch("index._make_clients", return_value=clients):
+            resp = self._call(params=[{"name": "metric", "value": "memory"}])
+        body = parse_body(resp)
+        self.assertEqual(body["metric"], "memory")
+        proc = body["processes"][0]
+        self.assertEqual(proc["unit"], "bytes")
+        self.assertIn("avg_mb", proc)
+        self.assertAlmostEqual(proc["avg_mb"], 100.0, places=0)
+
+    def test_unknown_metric_type_defaults_to_cpu(self):
+        cw = self._make_cw(metrics=[])
+        clients = make_clients(cloudwatch=cw)
+        with patch("index._make_clients", return_value=clients):
+            resp = self._call(params=[{"name": "metric", "value": "invalid"}])
+        body = parse_body(resp)
+        self.assertEqual(body["metric"], "cpu")
+
+    # ── top_n limiting ────────────────────────────────────────────────────
+
+    def test_top_n_limits_results(self):
+        metrics = [make_cw_metric(f"proc{i}") for i in range(10)]
+        results = [make_metric_data_result(f"p{i}", [float(i)]) for i in range(10)]
+        cw = self._make_cw(metrics=metrics, metric_data_results=results)
+        clients = make_clients(cloudwatch=cw)
+        with patch("index._make_clients", return_value=clients):
+            resp = self._call(params=[{"name": "top_n", "value": "3"}])
+        body = parse_body(resp)
+        self.assertEqual(len(body["processes"]), 3)
+        self.assertEqual(body["top_n"], 3)
+        self.assertEqual(body["total_processes_found"], 10)
+
+    def test_top_n_capped_at_20(self):
+        cw = self._make_cw(metrics=[])
+        clients = make_clients(cloudwatch=cw)
+        with patch("index._make_clients", return_value=clients):
+            resp = self._call(params=[{"name": "top_n", "value": "999"}])
+        body = parse_body(resp)
+        self.assertEqual(body["processes"], [])  # no metrics, but top_n was capped
+
+    def test_invalid_top_n_defaults_to_5(self):
+        cw = self._make_cw(metrics=[])
+        clients = make_clients(cloudwatch=cw)
+        with patch("index._make_clients", return_value=clients):
+            resp = self._call(params=[{"name": "top_n", "value": "notanumber"}])
+        body = parse_body(resp)
+        self.assertEqual(resp["response"]["httpStatusCode"], 200)
+
+    # ── hours parameter ───────────────────────────────────────────────────
+
+    def test_hours_reflected_in_response(self):
+        cw = self._make_cw(metrics=[])
+        clients = make_clients(cloudwatch=cw)
+        with patch("index._make_clients", return_value=clients):
+            resp = self._call(params=[{"name": "hours", "value": "6"}])
+        body = parse_body(resp)
+        self.assertEqual(body["hours"], 6)
+
+    def test_hours_clamped_max_24(self):
+        cw = self._make_cw(metrics=[])
+        clients = make_clients(cloudwatch=cw)
+        with patch("index._make_clients", return_value=clients):
+            resp = self._call(params=[{"name": "hours", "value": "100"}])
+        body = parse_body(resp)
+        self.assertEqual(body["hours"], 24)
+
+    def test_hours_clamped_min_1(self):
+        cw = self._make_cw(metrics=[])
+        clients = make_clients(cloudwatch=cw)
+        with patch("index._make_clients", return_value=clients):
+            resp = self._call(params=[{"name": "hours", "value": "0"}])
+        body = parse_body(resp)
+        self.assertEqual(body["hours"], 1)
+
+    def test_invalid_hours_defaults_to_1(self):
+        cw = self._make_cw(metrics=[])
+        clients = make_clients(cloudwatch=cw)
+        with patch("index._make_clients", return_value=clients):
+            resp = self._call(params=[{"name": "hours", "value": "abc"}])
+        body = parse_body(resp)
+        self.assertEqual(body["hours"], 1)
+
+    # ── Bedrock envelope contract ─────────────────────────────────────────
+
+    def test_response_envelope_has_required_fields(self):
+        cw = self._make_cw(metrics=[])
+        clients = make_clients(cloudwatch=cw)
+        with patch("index._make_clients", return_value=clients):
+            resp = self._call()
+        self.assertEqual(resp["messageVersion"], "1.0")
+        self.assertIn("response", resp)
+        r = resp["response"]
+        self.assertIn("httpStatusCode", r)
+        self.assertIn("responseBody", r)
+        self.assertIn("application/json", r["responseBody"])
+
+    def test_handler_routes_to_process_metrics(self):
+        event = {
+            "apiPath": "/get_ec2_process_metrics",
+            "httpMethod": "POST",
+            "parameters": [{"name": "region", "value": "us-east-1"}],
+            "requestBody": {},
+        }
+        cw = self._make_cw(metrics=[])
+        clients = make_clients(cloudwatch=cw)
+        with patch("index._make_clients", return_value=clients):
+            resp = index.handler(event, {})
+        self.assertEqual(resp["response"]["apiPath"], "/get_ec2_process_metrics")
+        self.assertEqual(resp["response"]["httpStatusCode"], 200)
+
+    def test_process_metrics_in_actions_dict(self):
+        self.assertIn("get_ec2_process_metrics", index.ACTIONS)
+        self.assertEqual(index.ACTIONS["get_ec2_process_metrics"], index.get_ec2_process_metrics)
+
+    # ── Invalid region ────────────────────────────────────────────────────
+
+    def test_invalid_region_returns_400(self):
+        event = make_event("/get_ec2_process_metrics",
+                           [{"name": "region", "value": "invalid-region-xyz"}])
+        resp = index.get_ec2_process_metrics(event)
+        self.assertEqual(resp["response"]["httpStatusCode"], 400)
+
+    # ── Metrics without data (no values in window) ────────────────────────
+
+    def test_processes_without_data_excluded(self):
+        metrics = [make_cw_metric("nginx"), make_cw_metric("java")]
+        # Only java has data; nginx has empty Values
+        results = [
+            {"Id": "p0", "Values": [], "Timestamps": [], "StatusCode": "Complete"},
+            make_metric_data_result("p1", [75.0]),
+        ]
+        cw = self._make_cw(metrics=metrics, metric_data_results=results)
+        clients = make_clients(cloudwatch=cw)
+        with patch("index._make_clients", return_value=clients):
+            resp = self._call()
+        body = parse_body(resp)
+        self.assertEqual(len(body["processes"]), 1)
+        self.assertEqual(body["processes"][0]["process_name"], "java")
+
+    # ── Default parameter values ──────────────────────────────────────────
+
+    def test_defaults_cpu_top5_1hour(self):
+        cw = self._make_cw(metrics=[])
+        clients = make_clients(cloudwatch=cw)
+        with patch("index._make_clients", return_value=clients):
+            resp = self._call()
+        body = parse_body(resp)
+        self.assertEqual(body["metric"], "cpu")
+        self.assertEqual(body["hours"], 1)
+
+    def test_list_metrics_called_with_cwagent_namespace(self):
+        cw = self._make_cw(metrics=[])
+        clients = make_clients(cloudwatch=cw)
+        with patch("index._make_clients", return_value=clients):
+            self._call()
+        cw.get_paginator.assert_called_with("list_metrics")
+        call_kwargs = cw.get_paginator.return_value.paginate.call_args[1]
+        self.assertEqual(call_kwargs["Namespace"], "CWAgent")
+        self.assertEqual(call_kwargs["MetricName"], "procstat cpu_usage")
+
+    def test_instance_filter_passed_to_list_metrics(self):
+        cw = self._make_cw(metrics=[])
+        clients = make_clients(cloudwatch=cw)
+        with patch("index._make_clients", return_value=clients):
+            self._call(params=[{"name": "instance_id", "value": "i-0abc"}])
+        call_kwargs = cw.get_paginator.return_value.paginate.call_args[1]
+        self.assertIn("Dimensions", call_kwargs)
+        self.assertEqual(call_kwargs["Dimensions"][0]["Value"], "i-0abc")
+
+
+
+# ── Helpers for new actions ───────────────────────────────────────────────────
+
+def make_lb(name, state="active", dns="lb.example.com",
+             arn="arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/my-lb/abc123"):
+    return {
+        "LoadBalancerName": name,
+        "LoadBalancerArn": arn,
+        "State": {"Code": state},
+        "DNSName": dns,
+    }
+
+
+def make_cloudtrail_event(event_name, username, source_ip="1.2.3.4", resource=None, error=None):
+    import json as _json
+    detail = {
+        "sourceIPAddress": source_ip,
+        "awsRegion": "us-east-1",
+        "userIdentity": {"arn": "arn:aws:iam::123:user/{}".format(username)},
+    }
+    if error:
+        detail["errorCode"] = error
+    return {
+        "EventName": event_name,
+        "Username": username,
+        "EventTime": datetime(2026, 6, 16, 12, 0, 0, tzinfo=timezone.utc),
+        "Resources": [{"ResourceName": resource}] if resource else [],
+        "CloudTrailEvent": _json.dumps(detail),
+    }
+
+
+# ── TestGetEc2InstanceMetrics ─────────────────────────────────────────────────
+
+class TestGetEc2InstanceMetrics(unittest.TestCase):
+
+    def _call(self, params=None):
+        event = make_event("/get_ec2_instance_metrics", params or [])
+        return index.handler(event, {})
+
+    def _make_ec2_with_instances(self, *instance_ids):
+        ec2 = MagicMock()
+        reservations = [{"Instances": [{"InstanceId": iid, "Tags": []}]} for iid in instance_ids]
+        ec2.get_paginator.return_value = make_paginator([{"Reservations": reservations}])
+        return ec2
+
+    def test_no_instances_returns_empty_list(self):
+        clients = make_clients()
+        with patch("index._make_clients", return_value=clients):
+            resp = self._call()
+        self.assertEqual(resp["response"]["httpStatusCode"], 200)
+        body = parse_body(resp)
+        self.assertEqual(body["instances"], [])
+        self.assertIn("note", body)
+
+    def test_returns_metrics_for_running_instance(self):
+        iid = "i-0abc1234"
+        ec2 = self._make_ec2_with_instances(iid)
+        cw = MagicMock()
+        safe = iid.replace("-", "_")
+        cw.get_metric_data.return_value = {"MetricDataResults": [
+            {"Id": "{}_CPUUtilization".format(safe), "Values": [75.0], "Timestamps": []},
+            {"Id": "{}_NetworkIn".format(safe),      "Values": [1000.0], "Timestamps": []},
+            {"Id": "{}_NetworkOut".format(safe),     "Values": [500.0], "Timestamps": []},
+            {"Id": "{}_DiskReadOps".format(safe),    "Values": [10.0], "Timestamps": []},
+            {"Id": "{}_DiskWriteOps".format(safe),   "Values": [5.0], "Timestamps": []},
+        ]}
+        clients = make_clients(ec2=ec2, cloudwatch=cw)
+        with patch("index._make_clients", return_value=clients):
+            resp = self._call()
+        body = parse_body(resp)
+        self.assertEqual(len(body["instances"]), 1)
+        inst = body["instances"][0]
+        self.assertEqual(inst["instance_id"], iid)
+        self.assertEqual(inst["cpu_pct"], 75.0)
+        self.assertEqual(inst["network_in_bytes"], 1000.0)
+
+    def test_instance_id_filter_passed_to_describe(self):
+        clients = make_clients()
+        with patch("index._make_clients", return_value=clients):
+            self._call(params=[{"name": "instance_id", "value": "i-filter"}])
+        paginator_call = clients["ec2"].get_paginator.return_value.paginate.call_args
+        filters = paginator_call[1]["Filters"]
+        id_filter = next((f for f in filters if f["Name"] == "instance-id"), None)
+        self.assertIsNotNone(id_filter)
+        self.assertEqual(id_filter["Values"], ["i-filter"])
+
+    def test_invalid_hours_defaults_to_1(self):
+        clients = make_clients()
+        with patch("index._make_clients", return_value=clients):
+            resp = self._call(params=[{"name": "hours", "value": "bad"}])
+        self.assertEqual(resp["response"]["httpStatusCode"], 200)
+
+    def test_hours_capped_at_24(self):
+        clients = make_clients()
+        with patch("index._make_clients", return_value=clients):
+            resp = self._call(params=[{"name": "hours", "value": "100"}])
+        self.assertEqual(resp["response"]["httpStatusCode"], 200)
+
+    def test_invalid_region_returns_400(self):
+        resp = self._call(params=[{"name": "region", "value": "not-a-region"}])
+        self.assertEqual(resp["response"]["httpStatusCode"], 400)
+
+    def test_multiple_instances_sorted_by_cpu_desc(self):
+        ec2 = MagicMock()
+        reservations = [{"Instances": [
+            {"InstanceId": "i-low",  "Tags": []},
+            {"InstanceId": "i-high", "Tags": []},
+        ]}]
+        ec2.get_paginator.return_value = make_paginator([{"Reservations": reservations}])
+        cw = MagicMock()
+        cw.get_metric_data.return_value = {"MetricDataResults": [
+            {"Id": "i_low_CPUUtilization",  "Values": [10.0], "Timestamps": []},
+            {"Id": "i_high_CPUUtilization", "Values": [90.0], "Timestamps": []},
+        ]}
+        clients = make_clients(ec2=ec2, cloudwatch=cw)
+        with patch("index._make_clients", return_value=clients):
+            resp = self._call()
+        body = parse_body(resp)
+        self.assertEqual(body["instances"][0]["instance_id"], "i-high")
+
+
+# ── TestGetAlbHealth ──────────────────────────────────────────────────────────
+
+class TestGetAlbHealth(unittest.TestCase):
+
+    def _call(self, params=None):
+        event = make_event("/get_alb_health", params or [])
+        return index.handler(event, {})
+
+    def _make_elb(self, lbs):
+        elb = MagicMock()
+        elb.describe_load_balancers.return_value = {"LoadBalancers": lbs}
+        return elb
+
+    def test_no_albs_returns_empty_list(self):
+        clients = make_clients()
+        with patch("index._make_clients", return_value=clients):
+            resp = self._call()
+        body = parse_body(resp)
+        self.assertEqual(body["load_balancers"], [])
+        self.assertIn("note", body)
+
+    def test_returns_alb_with_metrics(self):
+        lb = make_lb("my-lb",
+                     arn="arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/my-lb/abc")
+        elb = self._make_elb([lb])
+        cw = MagicMock()
+        cw.get_metric_data.return_value = {"MetricDataResults": [
+            {"Id": "my_lb_RequestCount",           "Values": [1000.0], "Timestamps": []},
+            {"Id": "my_lb_HTTPCode_ELB_4XX_Count",  "Values": [10.0],  "Timestamps": []},
+            {"Id": "my_lb_HTTPCode_ELB_5XX_Count",  "Values": [5.0],   "Timestamps": []},
+            {"Id": "my_lb_TargetResponseTime",      "Values": [0.1],   "Timestamps": []},
+            {"Id": "my_lb_HealthyHostCount",        "Values": [3.0],   "Timestamps": []},
+            {"Id": "my_lb_UnHealthyHostCount",      "Values": [0.0],   "Timestamps": []},
+        ]}
+        clients = make_clients(elbv2=elb, cloudwatch=cw)
+        with patch("index._make_clients", return_value=clients):
+            resp = self._call()
+        body = parse_body(resp)
+        self.assertEqual(len(body["load_balancers"]), 1)
+        lb_r = body["load_balancers"][0]
+        self.assertEqual(lb_r["name"], "my-lb")
+        self.assertEqual(lb_r["requests"], 1000)
+        self.assertEqual(lb_r["errors_4xx"], 10)
+        self.assertEqual(lb_r["health"], "OK")
+
+    def test_unhealthy_host_sets_critical(self):
+        lb = make_lb("bad-lb",
+                     arn="arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/bad-lb/xyz")
+        elb = self._make_elb([lb])
+        cw = MagicMock()
+        cw.get_metric_data.return_value = {"MetricDataResults": [
+            {"Id": "bad_lb_UnHealthyHostCount", "Values": [2.0], "Timestamps": []},
+        ]}
+        clients = make_clients(elbv2=elb, cloudwatch=cw)
+        with patch("index._make_clients", return_value=clients):
+            resp = self._call()
+        body = parse_body(resp)
+        self.assertEqual(body["load_balancers"][0]["health"], "CRITICAL")
+
+    def test_high_error_rate_sets_warning(self):
+        lb = make_lb("warn-lb",
+                     arn="arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/warn-lb/def")
+        elb = self._make_elb([lb])
+        cw = MagicMock()
+        cw.get_metric_data.return_value = {"MetricDataResults": [
+            {"Id": "warn_lb_RequestCount",           "Values": [100.0], "Timestamps": []},
+            {"Id": "warn_lb_HTTPCode_ELB_4XX_Count",  "Values": [10.0], "Timestamps": []},
+            {"Id": "warn_lb_UnHealthyHostCount",      "Values": [0.0],  "Timestamps": []},
+        ]}
+        clients = make_clients(elbv2=elb, cloudwatch=cw)
+        with patch("index._make_clients", return_value=clients):
+            resp = self._call()
+        body = parse_body(resp)
+        self.assertEqual(body["load_balancers"][0]["health"], "WARNING")
+
+    def test_alb_name_filter(self):
+        elb = MagicMock()
+        elb.describe_load_balancers.return_value = {"LoadBalancers": []}
+        clients = make_clients(elbv2=elb)
+        with patch("index._make_clients", return_value=clients):
+            self._call(params=[{"name": "alb_name", "value": "specific-lb"}])
+        elb.describe_load_balancers.assert_called_once_with(Names=["specific-lb"])
+
+    def test_invalid_region_returns_400(self):
+        resp = self._call(params=[{"name": "region", "value": "not-a-region"}])
+        self.assertEqual(resp["response"]["httpStatusCode"], 400)
+
+    def test_invalid_hours_defaults_gracefully(self):
+        clients = make_clients()
+        with patch("index._make_clients", return_value=clients):
+            resp = self._call(params=[{"name": "hours", "value": "abc"}])
+        self.assertEqual(resp["response"]["httpStatusCode"], 200)
+
+
+# ── TestGetCloudtrailActivity ─────────────────────────────────────────────────
+
+class TestGetCloudtrailActivity(unittest.TestCase):
+
+    def _call(self, params=None):
+        event = make_event("/get_cloudtrail_activity", params or [])
+        return index.handler(event, {})
+
+    def test_no_events_returns_empty(self):
+        clients = make_clients()
+        with patch("index._make_clients", return_value=clients):
+            resp = self._call()
+        body = parse_body(resp)
+        self.assertEqual(body["events"], [])
+        self.assertEqual(body["summary"]["total_events"], 0)
+
+    def test_returns_events(self):
+        ct = MagicMock()
+        ev = make_cloudtrail_event("TerminateInstances", "alice", resource="i-0abc")
+        ct.lookup_events.return_value = {"Events": [ev]}
+        clients = make_clients(cloudtrail=ct)
+        with patch("index._make_clients", return_value=clients):
+            resp = self._call()
+        body = parse_body(resp)
+        self.assertEqual(len(body["events"]), 1)
+        self.assertEqual(body["events"][0]["action"], "TerminateInstances")
+        self.assertEqual(body["events"][0]["user"], "alice")
+
+    def test_error_events_counted_in_summary(self):
+        ct = MagicMock()
+        ev = make_cloudtrail_event("DeleteBucket", "bob", error="AccessDenied")
+        ct.lookup_events.return_value = {"Events": [ev]}
+        clients = make_clients(cloudtrail=ct)
+        with patch("index._make_clients", return_value=clients):
+            resp = self._call()
+        body = parse_body(resp)
+        self.assertEqual(body["summary"]["errors"], 1)
+
+    def test_username_filter_passed_to_lookup(self):
+        ct = MagicMock()
+        ct.lookup_events.return_value = {"Events": []}
+        clients = make_clients(cloudtrail=ct)
+        with patch("index._make_clients", return_value=clients):
+            self._call(params=[{"name": "username", "value": "alice"}])
+        call_kwargs = ct.lookup_events.call_args[1]
+        self.assertIn("LookupAttributes", call_kwargs)
+        self.assertEqual(call_kwargs["LookupAttributes"][0]["AttributeKey"], "Username")
+        self.assertEqual(call_kwargs["LookupAttributes"][0]["AttributeValue"], "alice")
+
+    def test_event_name_filter(self):
+        ct = MagicMock()
+        ct.lookup_events.return_value = {"Events": []}
+        clients = make_clients(cloudtrail=ct)
+        with patch("index._make_clients", return_value=clients):
+            self._call(params=[{"name": "event_name", "value": "DeleteBucket"}])
+        call_kwargs = ct.lookup_events.call_args[1]
+        self.assertEqual(call_kwargs["LookupAttributes"][0]["AttributeKey"], "EventName")
+
+    def test_limit_capped_at_50(self):
+        ct = MagicMock()
+        ct.lookup_events.return_value = {"Events": []}
+        clients = make_clients(cloudtrail=ct)
+        with patch("index._make_clients", return_value=clients):
+            self._call(params=[{"name": "limit", "value": "999"}])
+        call_kwargs = ct.lookup_events.call_args[1]
+        self.assertEqual(call_kwargs["MaxResults"], 50)
+
+    def test_invalid_hours_defaults_to_3(self):
+        ct = MagicMock()
+        ct.lookup_events.return_value = {"Events": []}
+        clients = make_clients(cloudtrail=ct)
+        with patch("index._make_clients", return_value=clients):
+            resp = self._call(params=[{"name": "hours", "value": "bad"}])
+        body = parse_body(resp)
+        self.assertEqual(body["hours"], 3)
+
+    def test_invalid_region_returns_400(self):
+        resp = self._call(params=[{"name": "region", "value": "not-a-region"}])
+        self.assertEqual(resp["response"]["httpStatusCode"], 400)
+
+    def test_summary_counts_unique_users_and_actions(self):
+        ct = MagicMock()
+        events = [
+            make_cloudtrail_event("RunInstances",   "alice"),
+            make_cloudtrail_event("StopInstances",  "alice"),
+            make_cloudtrail_event("DeleteBucket",   "bob"),
+        ]
+        ct.lookup_events.return_value = {"Events": events}
+        clients = make_clients(cloudtrail=ct)
+        with patch("index._make_clients", return_value=clients):
+            resp = self._call()
+        body = parse_body(resp)
+        self.assertEqual(body["summary"]["unique_users"], 2)
+        self.assertEqual(body["summary"]["unique_actions"], 3)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

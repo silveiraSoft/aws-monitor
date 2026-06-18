@@ -3,20 +3,27 @@ import 'source-map-support/register';
 import * as cdk from 'aws-cdk-lib';
 import { MonitorAgentStack } from '../lib/monitor-agent-stack';
 import { ChatFrontendStack } from '../lib/chat-frontend-stack';
+import { environments } from '../config/environments';
 
 const app = new cdk.App();
 
-const account = process.env.CDK_DEFAULT_ACCOUNT;
-if (!account) {
+// Ambiente se pasa como: cdk deploy --context env=dev|prod
+// Si no se especifica, usa 'dev' por defecto.
+const deployEnv = (app.node.tryGetContext('env') as string) ?? 'dev';
+const envConfig = environments[deployEnv];
+
+if (!envConfig) {
   throw new Error(
-    'CDK_DEFAULT_ACCOUNT is not set. Run: export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text) ' +
-    'and ensure your AWS credentials are configured before running cdk synth/deploy.'
+    `Ambiente desconocido: "${deployEnv}". Valores válidos: ${Object.keys(environments).join(', ')}.\n` +
+    'Ejemplo: npm run deploy:dev  o  npm run deploy:prod'
   );
 }
 
+console.log(`Deploying to environment: ${deployEnv} (account: ${envConfig.account}, region: ${envConfig.region})`);
+
 const env = {
-  account,
-  region: 'us-east-1',
+  account: envConfig.account,
+  region:  envConfig.region,
 };
 
 const agentStack = new MonitorAgentStack(app, 'AwsMonitorAgentStack', { env });

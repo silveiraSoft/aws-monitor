@@ -35,13 +35,27 @@
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "overall_status": { "type": "string" },
-                    "timestamp": { "type": "string" },
-                    "ec2": { "type": "object" },
-                    "active_alarms": { "type": "integer" },
-                    "lambda_functions": { "type": "integer" },
-                    "recommendation": { "type": "string" },
-                    "region": { "type": "string" }
+                    "overall_status": {
+                      "type": "string"
+                    },
+                    "timestamp": {
+                      "type": "string"
+                    },
+                    "ec2": {
+                      "type": "object"
+                    },
+                    "active_alarms": {
+                      "type": "integer"
+                    },
+                    "lambda_functions": {
+                      "type": "integer"
+                    },
+                    "recommendation": {
+                      "type": "string"
+                    },
+                    "region": {
+                      "type": "string"
+                    }
                   }
                 }
               }
@@ -83,9 +97,18 @@
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "summary": { "type": "object" },
-                    "instances": { "type": "array", "items": { "type": "object" } },
-                    "region": { "type": "string" }
+                    "summary": {
+                      "type": "object"
+                    },
+                    "instances": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "region": {
+                      "type": "string"
+                    }
                   }
                 }
               }
@@ -131,10 +154,21 @@
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "period_hours": { "type": "integer" },
-                    "total_functions": { "type": "integer" },
-                    "functions": { "type": "array", "items": { "type": "object" } },
-                    "region": { "type": "string" }
+                    "period_hours": {
+                      "type": "integer"
+                    },
+                    "total_functions": {
+                      "type": "integer"
+                    },
+                    "functions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "region": {
+                      "type": "string"
+                    }
                   }
                 }
               }
@@ -154,7 +188,9 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["log_group"],
+                "required": [
+                  "log_group"
+                ],
                 "properties": {
                   "region": {
                     "type": "string",
@@ -185,15 +221,36 @@
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "log_group": { "type": "string" },
-                    "period_hours": { "type": "integer" },
-                    "query": { "type": "string" },
-                    "status": { "type": "string" },
-                    "total_events": { "type": "integer" },
-                    "error_events": { "type": "integer" },
-                    "statistics": { "type": "object" },
-                    "events": { "type": "array", "items": { "type": "object" } },
-                    "region": { "type": "string" }
+                    "log_group": {
+                      "type": "string"
+                    },
+                    "period_hours": {
+                      "type": "integer"
+                    },
+                    "query": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string"
+                    },
+                    "total_events": {
+                      "type": "integer"
+                    },
+                    "error_events": {
+                      "type": "integer"
+                    },
+                    "statistics": {
+                      "type": "object"
+                    },
+                    "events": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "region": {
+                      "type": "string"
+                    }
                   }
                 }
               }
@@ -239,11 +296,24 @@
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "period_hours": { "type": "integer" },
-                    "total_traces": { "type": "integer" },
-                    "summary": { "type": "object" },
-                    "traces": { "type": "array", "items": { "type": "object" } },
-                    "region": { "type": "string" }
+                    "period_hours": {
+                      "type": "integer"
+                    },
+                    "total_traces": {
+                      "type": "integer"
+                    },
+                    "summary": {
+                      "type": "object"
+                    },
+                    "traces": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "region": {
+                      "type": "string"
+                    }
                   }
                 }
               }
@@ -285,9 +355,18 @@
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "summary": { "type": "object" },
-                    "alarms": { "type": "array", "items": { "type": "object" } },
-                    "region": { "type": "string" }
+                    "summary": {
+                      "type": "object"
+                    },
+                    "alarms": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "region": {
+                      "type": "string"
+                    }
                   }
                 }
               }
@@ -333,17 +412,292 @@
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "managed_instance_count": { "type": "integer" },
-                    "instances": { "type": "array", "items": { "type": "object" } },
-                    "inventory": { "type": "array", "items": { "type": "object" } },
-                    "note": { "type": "string" },
-                    "region": { "type": "string" }
+                    "managed_instance_count": {
+                      "type": "integer"
+                    },
+                    "instances": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "inventory": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "note": {
+                      "type": "string"
+                    },
+                    "region": {
+                      "type": "string"
+                    }
                   }
                 }
               }
             }
           }
         }
+      }
+    },
+    "/get_ec2_process_metrics": {
+      "post": {
+        "operationId": "get_ec2_process_metrics",
+        "summary": "Get top EC2 processes by CPU or memory usage",
+        "description": "Returns the top N processes consuming the most CPU or memory on EC2 instances, using CloudWatch Agent procstat metrics. Requires CloudWatch Agent with procstat plugin installed and running on the instances.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "metric": {
+                    "type": "string",
+                    "description": "Metric to sort by: 'cpu' for CPU usage (%) or 'memory' for RAM usage (bytes/MB). Default: cpu"
+                  },
+                  "instance_id": {
+                    "type": "string",
+                    "description": "Optional EC2 instance ID (e.g. i-0abc123). If omitted, returns processes across all instances with CloudWatch Agent."
+                  },
+                  "top_n": {
+                    "type": "integer",
+                    "description": "Number of top processes to return. Default: 5, max: 20"
+                  },
+                  "hours": {
+                    "type": "integer",
+                    "description": "Lookback window in hours for average calculation. Default: 1, max: 24"
+                  },
+                  "region": {
+                    "type": "string",
+                    "description": "AWS region to query. Default: us-east-1"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Top processes by CPU or memory usage",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "metric": {
+                      "type": "string"
+                    },
+                    "instance_id": {
+                      "type": "string"
+                    },
+                    "hours": {
+                      "type": "integer"
+                    },
+                    "top_n": {
+                      "type": "integer"
+                    },
+                    "total_processes_found": {
+                      "type": "integer"
+                    },
+                    "processes": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "note": {
+                      "type": "string"
+                    },
+                    "region": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/get_ec2_instance_metrics": {
+      "post": {
+        "operationId": "get_ec2_instance_metrics",
+        "summary": "Get EC2 instance CPU, network and disk metrics",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "instance_id": {
+                    "type": "string",
+                    "description": "Optional EC2 instance ID (e.g. i-0abc123). If omitted, returns metrics for all running instances."
+                  },
+                  "hours": {
+                    "type": "integer",
+                    "description": "Lookback period in hours (1-24). Default: 1"
+                  },
+                  "region": {
+                    "type": "string",
+                    "description": "AWS region (e.g. us-east-1). Default: us-east-1"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "EC2 instance metrics returned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "instances": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "count": {
+                      "type": "integer"
+                    },
+                    "region": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "description": "Returns CPU utilization, network in/out and disk read/write ops per EC2 instance using CloudWatch basic monitoring. No CloudWatch Agent required \u2014 works on all instances by default."
+      }
+    },
+    "/get_alb_health": {
+      "post": {
+        "operationId": "get_alb_health",
+        "summary": "Get Application Load Balancer health and traffic metrics",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "alb_name": {
+                    "type": "string",
+                    "description": "Optional ALB name to filter. If omitted, returns all ALBs."
+                  },
+                  "hours": {
+                    "type": "integer",
+                    "description": "Lookback period in hours (1-24). Default: 1"
+                  },
+                  "region": {
+                    "type": "string",
+                    "description": "AWS region (e.g. us-east-1). Default: us-east-1"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ALB health metrics returned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "load_balancers": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "count": {
+                      "type": "integer"
+                    },
+                    "region": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "description": "Returns request count, 4xx and 5xx error rates, average latency, and healthy/unhealthy host counts per ALB. Health is CRITICAL if unhealthy hosts > 0, WARNING if error rate > 5%."
+      }
+    },
+    "/get_cloudtrail_activity": {
+      "post": {
+        "operationId": "get_cloudtrail_activity",
+        "summary": "Get recent AWS API activity from CloudTrail",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "username": {
+                    "type": "string",
+                    "description": "Optional IAM username or role to filter events by."
+                  },
+                  "event_name": {
+                    "type": "string",
+                    "description": "Optional CloudTrail event name to filter (e.g. DeleteBucket, TerminateInstances)."
+                  },
+                  "hours": {
+                    "type": "integer",
+                    "description": "Lookback period in hours (1-24). Default: 3"
+                  },
+                  "limit": {
+                    "type": "integer",
+                    "description": "Max events to return (1-50). Default: 20"
+                  },
+                  "region": {
+                    "type": "string",
+                    "description": "AWS region (e.g. us-east-1). Default: us-east-1"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "CloudTrail events returned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "summary": {
+                      "type": "object"
+                    },
+                    "events": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "region": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "description": "Returns recent AWS API calls from CloudTrail. Use for auditing who changed what, detecting unauthorized actions, or tracing configuration changes. Can filter by username or event name."
       }
     }
   }
