@@ -518,7 +518,8 @@ export class MonitorAgentStack extends cdk.Stack {
       name: cwAgentSetupDoc.ref,
       associationName: 'monitor-cwagent-setup',
       targets: [{ key: 'InstanceIds', values: ['*'] }],
-      scheduleExpression: 'rate(7 days)',
+      // rate(1 day): if CW Agent crashes or instance reboots, it auto-recovers within 24h.
+      scheduleExpression: 'rate(1 day)',
       complianceSeverity: 'LOW',
     });
     cwAgentSetupAssoc.node.addDependency(cwAgentSetupDoc);

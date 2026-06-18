@@ -1476,7 +1476,8 @@ class TestGetEc2ProcessMetrics(unittest.TestCase):
         cw.get_paginator.assert_called_with("list_metrics")
         call_kwargs = cw.get_paginator.return_value.paginate.call_args[1]
         self.assertEqual(call_kwargs["Namespace"], "CWAgent")
-        self.assertEqual(call_kwargs["MetricName"], "procstat cpu_usage")
+        # Lambda tries both formats: space (Windows) and underscore (Linux)
+        self.assertIn(call_kwargs["MetricName"], ["procstat cpu_usage", "procstat_cpu_usage"])
 
     def test_instance_filter_passed_to_list_metrics(self):
         cw = self._make_cw(metrics=[])

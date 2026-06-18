@@ -732,26 +732,30 @@ def get_ec2_process_metrics(event):
         hours = 1
 
     if metric_type == "memory":
-        metric_name = "procstat memory_rss"
+        metric_names = ["procstat memory_rss", "procstat_memory_rss"]
         unit_label = "bytes"
     else:
         metric_type = "cpu"
-        metric_name = "procstat cpu_usage"
+        metric_names = ["procstat cpu_usage", "procstat_cpu_usage"]
         unit_label = "%"
 
     try:
         clients = _make_clients(region)
         cw = clients["cloudwatch"]
 
-        # List available procstat metrics
-        list_kwargs = {"Namespace": "CWAgent", "MetricName": metric_name}
-        if instance_id:
-            list_kwargs["Dimensions"] = [{"Name": "InstanceId", "Value": instance_id}]
-
+        # List available procstat metrics — try both name formats (space=Windows, underscore=Linux)
         raw_metrics = []
-        paginator = cw.get_paginator("list_metrics")
-        for page in paginator.paginate(**list_kwargs):
-            raw_metrics.extend(page["Metrics"])
+        metric_name = metric_names[0]
+        for candidate_name in metric_names:
+            list_kwargs = {"Namespace": "CWAgent", "MetricName": candidate_name}
+            if instance_id:
+                list_kwargs["Dimensions"] = [{"Name": "InstanceId", "Value": instance_id}]
+            paginator = cw.get_paginator("list_metrics")
+            for page in paginator.paginate(**list_kwargs):
+                raw_metrics.extend(page["Metrics"])
+            if raw_metrics:
+                metric_name = candidate_name
+                break
 
         if not raw_metrics:
             return ok({
