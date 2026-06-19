@@ -343,6 +343,8 @@
     <span class="badge">Logs Insights</span>
     <span class="badge">X-Ray</span>
     <span class="badge">SSM</span>
+    <span class="badge">ALB</span>
+    <span class="badge">CloudTrail</span>
   </div>
   <div class="header-right">
     <div class="status-indicator">
@@ -401,6 +403,22 @@
         <span class="cap-icon">&#128187;</span>
         <div class="cap-text"><strong>SSM Inventory</strong><span>SO, apps instaladas, versiones, config de red (requiere SSM Agent)</span></div>
       </div>
+      <div class="cap-item">
+        <span class="cap-icon">&#129504;</span>
+        <div class="cap-text"><strong>Procesos EC2</strong><span>Top procesos por CPU y memoria en cada instancia (requiere CW Agent)</span></div>
+      </div>
+      <div class="cap-item">
+        <span class="cap-icon">&#128200;</span>
+        <div class="cap-text"><strong>EC2 Metrics</strong><span>CPU, red y disco por instancia via CloudWatch</span></div>
+      </div>
+      <div class="cap-item">
+        <span class="cap-icon">&#9878;</span>
+        <div class="cap-text"><strong>ALB Health</strong><span>Estado de load balancers: latencia, errores 4xx/5xx, hosts saludables</span></div>
+      </div>
+      <div class="cap-item">
+        <span class="cap-icon">&#128270;</span>
+        <div class="cap-text"><strong>CloudTrail Audit</strong><span>Auditoria de cambios AWS: quien hizo que y cuando</span></div>
+      </div>
     </div>
   </div>
 </div>
@@ -414,6 +432,10 @@
   <button class="suggestion-btn" onclick="sendSuggestion('Analiza los errores recientes en los logs de la ultima hora')">&#128203; Analizar logs</button>
   <button class="suggestion-btn" onclick="sendSuggestion('Muestrame las trazas X-Ray con faults en las ultimas 2 horas')">&#128301; X-Ray traces</button>
   <button class="suggestion-btn" onclick="sendSuggestion('Que aplicaciones y versiones tiene instaladas mi instancia EC2?')">&#128187; SSM Inventory</button>
+  <button class="suggestion-btn" onclick="sendSuggestion('Dame los 5 procesos que consumen mas CPU y memoria en mis instancias EC2')">&#129504; Procesos CPU/RAM</button>
+  <button class="suggestion-btn" onclick="sendSuggestion('Muestra las metricas de CPU, red y disco de mis instancias EC2 en la ultima hora')">&#128200; EC2 Metrics</button>
+  <button class="suggestion-btn" onclick="sendSuggestion('Como estan los load balancers ALB? Hay errores o hosts no saludables?')">&#9878; ALB Health</button>
+  <button class="suggestion-btn" onclick="sendSuggestion('Que cambios se han hecho en la infraestructura AWS en las ultimas 24 horas?')">&#128270; CloudTrail</button>
 </div>
 
 <div class="footer-bar">
