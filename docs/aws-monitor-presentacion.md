@@ -1,6 +1,6 @@
 # 🚀 AWS Monitor Agent — Solución de Monitoreo Inteligente con IA
 
-> **Empresa:** 3htp &nbsp;|&nbsp; **Tecnología:** Amazon Bedrock + Claude Haiku 4.5 &nbsp;|&nbsp; **Estado:** POC Completada ✅ &nbsp;|&nbsp; **Multi-región:** 29 regiones AWS
+> **Empresa:** 3htp &nbsp;|&nbsp; **Tecnología:** Amazon Bedrock + Claude Haiku 4.5 &nbsp;|&nbsp; **Estado:** Desplegada y Operativa ✅ &nbsp;|&nbsp; **Multi-región:** 29 regiones AWS
 
 ---
 
@@ -22,6 +22,9 @@ En infraestructuras AWS con múltiples servicios corriendo en paralelo, el equip
 - _"¿Qué servicio está causando la lentitud en las peticiones de los últimos 30 minutos?"_
 - _"¿Cómo están las EC2 en eu-west-1?"_ ← multi-región
 - _"Compara las alarmas de us-east-1 y ap-southeast-1"_ ← multi-región
+- _"¿Cuáles son los 5 procesos que más CPU consumen en SCT-Test?"_ ← procesos EC2
+- _"¿Qué cambios se hicieron en la infraestructura en las últimas 24 horas?"_ ← CloudTrail
+- _"¿Están saludables los load balancers ALB?"_ ← ALB Health
 
 …y recibir una respuesta clara, estructurada e inmediata — **sin abrir la consola de AWS**.
 
@@ -31,7 +34,7 @@ En infraestructuras AWS con múltiples servicios corriendo en paralelo, el equip
 
 | Requisito del cliente | Estado | Detalle |
 |---|---|---|
-| Agente que se conecte a AWS y monitoree | ✅ Implementado | Bedrock Agent con 7 acciones de monitoreo en tiempo real |
+| Agente que se conecte a AWS y monitoree | ✅ Implementado | Bedrock Agent con 11 acciones de monitoreo en tiempo real |
 | Frontend de chat accesible desde browser | ✅ Implementado | Chat UI estático en S3 + CloudFront (HTTPS global) |
 | Análisis de salud general | ✅ Implementado | `get_overall_health` retorna status + recomendaciones |
 | Lenguaje natural (sin comandos técnicos) | ✅ Implementado | Claude Haiku 4.5 interpreta y responde en español o inglés |
@@ -40,6 +43,10 @@ En infraestructuras AWS con múltiples servicios corriendo en paralelo, el equip
 | Diagnóstico histórico de logs | ✅ Implementado | CloudWatch Logs Insights — búsqueda por patrones y errores |
 | Trazas de peticiones distribuidas | ✅ Implementado | AWS X-Ray — latencia p99, faults, root cause por servicio |
 | Inventario de software en EC2 (SSM) | ✅ Implementado | SSM Inventory — SO, apps, versiones, config de red (requiere SSM Agent) |
+| Procesos por CPU y memoria en EC2 | ✅ Implementado | CloudWatch Agent procstat — top procesos en Linux y Windows (SCT-Test y IBMWebMethod validados) |
+| Métricas de instancia EC2 (CPU, red, disco) | ✅ Implementado | `get_ec2_instance_metrics` — via CloudWatch sin agente adicional |
+| Salud de Load Balancers ALB | ✅ Implementado | `get_alb_health` — requests, errores 4xx/5xx, latencia, hosts saludables |
+| Auditoría de cambios AWS | ✅ Implementado | `get_cloudtrail_activity` — quién hizo qué y cuándo en la cuenta |
 | Monitoreo multi-región | ✅ Implementado | 29 regiones AWS — especifica la región en la pregunta o usa el default us-east-1 |
 
 ---
@@ -172,9 +179,17 @@ En infraestructuras AWS con múltiples servicios corriendo en paralelo, el equip
               │  │  (latencia p99, faults, errores) │ │
               │  └──────────────────────────────────┘ │
               │  ┌──────────────────────────────────┐ │
-              │  │     AWS SSM Inventory 🆕         │ │
-              │  │  (SO, apps, versiones, red)      │ │
+              │  │     AWS SSM Inventory             │ │
+              │  │  (SO, apps, versiones, red)       │ │
               │  └──────────────────────────────────┘ │
+              │  ┌──────────────────────────────────┐ │
+              │  │  EC2 Process Metrics 🆕          │ │
+              │  │  (CW Agent procstat — CPU/RAM)   │ │
+              │  └──────────────────────────────────┘ │
+              │  ┌──────────┐  ┌──────────────────┐   │
+              │  │   ALB    │  │  CloudTrail 🆕   │   │
+              │  │ Health🆕 │  │  (auditoría)     │   │
+              │  └──────────┘  └──────────────────┘   │
               └──────────────────────────────────────┘
                                  │
                     ┌────────────┴────────────┐
@@ -186,6 +201,8 @@ En infraestructuras AWS con múltiples servicios corriendo en paralelo, el equip
                     │   • CloudWatch Logs     │
                     │   • X-Ray traces        │
                     │   • SSM Inventory       │
+                    │   • CW Agent / procstat │
+                    │   • ALB / CloudTrail    │
                     └─────────────────────────┘
 ```
 
@@ -359,6 +376,97 @@ El agente puede consultar el **inventario de software y configuración** de las 
 
 ---
 
+### 8. EC2 Process Metrics — Top Procesos por CPU y Memoria 🆕
+
+El agente puede consultar **qué procesos están consumiendo más CPU y memoria** en cada instancia EC2, con datos en tiempo real obtenidos del CloudWatch Agent con el plugin `procstat`.
+
+| Dato reportado | Ejemplo |
+|---|---|
+| Nombre del proceso | `java`, `nginx`, `python3`, `mysqld` |
+| Uso promedio de CPU | `85.3%` |
+| Uso máximo de CPU | `97.1%` |
+| Uso de memoria RSS | `2.1 GB` |
+| Top N procesos | Configurable: top 5, 10, 20 |
+
+**Preguntas que puede responder:**
+- _"¿Cuáles son los 5 procesos que más CPU consumen en SCT-Test?"_
+- _"¿Qué proceso está usando más memoria en IBMWebMethod?"_
+- _"Dame el top 10 de procesos por CPU en todas las instancias"_
+
+**Requisito:** CloudWatch Agent con plugin `procstat` instalado en la instancia. El sistema `aws-monitor` puede instalarlo automáticamente vía SSM en instancias que tienen SSM Agent activo (ver `docs/cloudwatch-agent-manual-setup.md`).
+
+**Validado en producción:**
+- **SCT-Test** (Windows Server): 92 métricas de procesos activas en namespace `CWAgent`
+- **IBMWebMethod** (Linux): 370 métricas de procesos activas en namespace `CWAgent`
+
+**Costo adicional:** ~$0.30/mes por instancia con uso normal de CloudWatch custom metrics.
+
+---
+
+### 9. EC2 Instance Metrics — CPU, Red y Disco por Instancia 🆕
+
+El agente consulta las **métricas básicas de infraestructura** de cada instancia EC2 directamente desde CloudWatch, sin necesidad del CloudWatch Agent.
+
+| Métrica | Detalle |
+|---|---|
+| CPU Utilization | Promedio y máximo en el período |
+| Network In / Out | Bytes de tráfico entrante y saliente |
+| Disk Read / Write Ops | Operaciones de disco (instancias con volumen de instancia) |
+
+**Preguntas que puede responder:**
+- _"¿Cuál es el uso de CPU de mis instancias EC2 en la última hora?"_
+- _"¿Cuánto tráfico de red tiene prod-api-server?"_
+- _"¿Hay instancias con CPU por encima del 80%?"_
+
+---
+
+### 10. ALB Health — Estado de Load Balancers 🆕
+
+El agente consulta la **salud de los Application Load Balancers** de la cuenta, incluyendo hosts registrados, errores y latencia.
+
+| Dato reportado | Ejemplo |
+|---|---|
+| Requests totales | `45,230 en la última hora` |
+| Errores 4xx | `123 (0.3%)` |
+| Errores 5xx | `0 (0.0%)` |
+| Latencia promedio | `42 ms` |
+| Hosts saludables | `3` |
+| Hosts no saludables | `0` |
+| Estado de salud | `HEALTHY` / `WARNING` / `CRITICAL` |
+
+**Lógica de salud:**
+- 🔴 `CRITICAL` — hay hosts no saludables
+- 🟡 `WARNING` — error rate > 5%
+- 🟢 `HEALTHY` — todo normal
+
+**Preguntas que puede responder:**
+- _"¿Están saludables los load balancers?"_
+- _"¿Hay errores 5xx en el ALB de producción?"_
+- _"¿Cuál es la latencia del ALB en la última hora?"_
+
+---
+
+### 11. CloudTrail Activity — Auditoría de Cambios AWS 🆕
+
+El agente puede consultar **quién hizo qué y cuándo** en la cuenta AWS usando CloudTrail, permitiendo auditoría de cambios sin acceso a la consola.
+
+| Dato reportado | Ejemplo |
+|---|---|
+| Usuario o rol | `asilveira@3htp.com` / `AWSServiceRole` |
+| Acción realizada | `TerminateInstances`, `DeleteBucket`, `CreateUser` |
+| Recurso afectado | `i-0abc123`, `my-bucket`, `john.doe` |
+| Fecha y hora | `2026-06-19T14:23:00Z` |
+| Resultado | `Success` / `Failed` |
+| Total de eventos | `47 eventos en las últimas 24h` |
+
+**Preguntas que puede responder:**
+- _"¿Qué cambios se hicieron en la infraestructura en las últimas 24 horas?"_
+- _"¿Quién eliminó recursos ayer?"_
+- _"¿Qué hizo el usuario asilveira en la última hora?"_
+- _"¿Hubo intentos de acceso fallidos hoy?"_
+
+---
+
 ## 🤖 ¿Por qué Amazon Bedrock + Claude Haiku 4.5?
 
 La solución usa **Amazon Bedrock Agents** con **Claude Haiku 4.5** como motor de inteligencia. Esto no es solo un chatbot — es un agente que:
@@ -389,11 +497,14 @@ La arquitectura está diseñada para **escalar sin reescribir código**. Agregar
 | ✅ CloudWatch Logs Insights | Errores, patrones, frecuencias históricas | **Ya implementado** |
 | ✅ AWS X-Ray | Latencia p99, faults, errores por servicio | **Ya implementado** |
 | ✅ AWS SSM Inventory | SO, apps instaladas, versiones, config de red | **Ya implementado** |
+| ✅ EC2 Process Metrics | Top procesos por CPU y memoria (requiere CW Agent) | **Ya implementado** |
+| ✅ EC2 Instance Metrics | CPU, red, disco por instancia | **Ya implementado** |
+| ✅ ALB Health | Request rate, errores 4xx/5xx, latencia, hosts | **Ya implementado** |
+| ✅ CloudTrail Activity | Auditoría de cambios — quién hizo qué y cuándo | **Ya implementado** |
 | 🔜 RDS | Estado, conexiones, storage | ~1 hora |
 | 🔜 ECS / EKS | Tasks corriendo, estado de pods | ~2 horas |
 | 🔜 S3 | Tamaño de buckets, requests | ~1 hora |
 | 🔜 DynamoDB | Latencia, throttles, capacidad | ~1 hora |
-| 🔜 ALB / CloudFront | Request rate, errores 5xx | ~1 hora |
 | ✅ Multi-región | Misma UI, datos de cualquier región AWS | **Ya implementado** |
 
 ---
@@ -484,7 +595,7 @@ La POC incorpora controles de seguridad en todas las capas. Se realizó una audi
 │ Seguridad        │ AWS IAM Roles                    │
 │ Deploy           │ AWS CDK deploy (1 comando)       │
 ├──────────────────┴──────────────────────────────────┤
-│ Tests: 281 tests pasando (unit + integration + e2e) │
+│ Tests: 326 tests pasando (unit + integration + e2e) │
 │ Región: us-east-1 · Auth: IAM (sin access keys)     │
 └─────────────────────────────────────────────────────┘
 ```
@@ -541,6 +652,10 @@ Y puede hacer preguntas como estas en el chat:
 | _"¿Qué SO tiene la instancia i-0abc123?"_ | Nombre, versión del SO y estado del SSM Agent vía SSM Inventory |
 | _"¿Qué aplicaciones tiene instaladas prod-api-server?"_ | Lista de apps con versión, publicador y fecha de instalación |
 | _"¿Cuántas funciones Lambda tengo?"_ | Count total + breakdown por estado de salud |
+| _"¿Cuáles son los 5 procesos que más CPU consumen en SCT-Test?"_ | Top procesos con % CPU y RAM via CW Agent procstat |
+| _"¿Cuál es el uso de CPU y red de mis instancias EC2?"_ | Métricas de infraestructura por instancia de CloudWatch |
+| _"¿Están saludables los load balancers ALB?"_ | Estado, errores 4xx/5xx, latencia, hosts saludables |
+| _"¿Qué cambios se hicieron en la infra ayer?"_ | Auditoría CloudTrail: usuario, acción, recurso, hora |
 
 ---
 
@@ -549,7 +664,7 @@ Y puede hacer preguntas como estas en el chat:
 | Entregable | Estado |
 |---|---|
 | Código CDK completo (2 stacks) | ✅ Listo |
-| Lambda action handler (7 acciones) | ✅ Listo |
+| Lambda action handler (11 acciones) | ✅ Listo |
 | Frontend chat UI con panel de configuración API Key | ✅ Listo |
 | Diagrama de arquitectura | ✅ Listo |
 | Documentación técnica (PPTX) | ✅ Listo |
@@ -557,9 +672,11 @@ Y puede hacer preguntas como estas en el chat:
 | CloudWatch Logs Insights (análisis histórico de logs) | ✅ Listo |
 | AWS X-Ray (trazas distribuidas, latencia p99) | ✅ Listo |
 | SSM Inventory (SO, apps, versiones, config red) | ✅ Listo |
-| Suite de tests (281 tests — unit/integration/e2e) | ✅ Listo |
+| Suite de tests (326 tests — unit/integration/e2e) | ✅ Listo |
 | Script de validación pre-deploy (14 checks) | ✅ Listo |
-| **Listo para deploy en AWS** | ⏳ Pendiente habilitación modelo Bedrock |
+| CW Agent auto-provisioning (procstat CPU/RAM) | ✅ Listo — validado en SCT-Test y IBMWebMethod |
+| Multi-ambiente dev/prod (config/environments.ts) | ✅ Listo |
+| **DEPLOYADO Y OPERATIVO** | ✅ Activo en cuenta 3htp |
 
 ### Próximo paso para ir a producción:
 
@@ -662,7 +779,7 @@ Estas soluciones no compiten — resuelven problemas distintos para audiencias d
 | **Perfil de usuario** | No técnico — solo escribe en el chat | Técnico — configura, extiende, integra |
 | **Tiempo al primer uso** | 5 minutos post-deploy | 2-4 semanas para MVP completo |
 | **Curva de mantenimiento** | Muy baja — CDK gestiona todo | Media-alta — Docker, Runtime, MCP ecosystem |
-| **Cobertura de servicios** | EC2, Lambda, CloudWatch, Logs, X-Ray, SSM Inventory (7 acciones) | Potencialmente todo AWS (~60+ tools en AWS MCP Server) |
+| **Cobertura de servicios** | EC2, Lambda, CloudWatch, Logs, X-Ray, SSM, ALB, CloudTrail, Procesos EC2 (11 acciones) | Potencialmente todo AWS (~60+ tools en AWS MCP Server) |
 | **Costo** | < $2/mes equipo pequeño | Mayor — Runtime por hora + contenedores |
 | **Modelo de extensión** | Agregar función Python + endpoint OpenAPI | Agregar MCP server (contenedor externo) |
 | **Frontend** | ✅ Incluido y desplegado | ❌ Requiere desarrollo separado |
@@ -732,13 +849,14 @@ Los servicios globales de AWS (IAM, Route 53, CloudFront, S3 global) no tienen r
 
 | Prioridad | Feature | Valor para el cliente |
 |---|---|---|
-| 🔴 Inmediato | Deploy en AWS + habilitar X-Ray tracing en Lambdas | Tener la solución funcionando con trazas reales |
+| ✅ Completado | Deploy en AWS + solución operativa | AgentStack + FrontendStack activos |
 | 🟡 Corto plazo | Agregar RDS y ECS al monitoreo | Cobertura completa del stack |
 | 🟡 Corto plazo | Autenticación con Cognito | Usuarios con login propio, sin compartir API Key |
 | 🟢 Mediano plazo | Alertas proactivas por email/Slack | El agente avisa sin que pregunten |
-| ✅ Completado | Monitoreo multi-región (29 regiones) | Ya disponible — especifica la región en la pregunta |
+| ✅ Completado | Monitoreo multi-región (29 regiones) | Especifica la región en la pregunta |
+| ✅ Completado | ALB Health + CloudTrail + EC2 Metrics + Procesos | 4 nuevas capacidades de monitoreo |
 | 🟢 Largo plazo | Upgrade a Claude 3.5 Sonnet | Análisis de causa raíz más profundo y conversaciones más largas |
 
 ---
 
-*Documento actualizado el 2026-06-11 · AWS Monitor Agent POC · 3htp · asilveira@3htp.com*
+*Documento actualizado el 2026-06-23 · AWS Monitor Agent — Desplegado y Operativo · 3htp · asilveira@3htp.com*
